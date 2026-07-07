@@ -22,8 +22,9 @@ enforced rule.
 
 | Layer | Module | What it does |
 |-------|--------|--------------|
-| **CLI** | `lmtrade.cli` | `run`, `web`, `status`, `deploy`, `reset`, `config` |
+| **CLI** | `lmtrade.cli` | `run`, `web`, `viz`, `status`, `deploy`, `reset`, `config` |
 | **Web dashboard** | `lmtrade.web` | Portfolio, economics, trades, activity feed, logs, equity curve |
+| **Inline viz** | `lmtrade.viz` | Notebook-native matplotlib dashboard (Colab/Jupyter) + `lmtrade viz` PNG |
 | **Engine** | `core.engine` | Evaluation loop: data → economics gate → risk → fusion → execution |
 | **Fusion** | `agents.fusion` | Weighted vote across all model providers → one `Decision` |
 | **Models** | `models.providers` | Heuristic (financial), local SLM (Ollama), cloud LLM, Perplexity research |
@@ -75,9 +76,21 @@ cp .env.example .env              # add OLLAMA_HOST, ANTHROPIC_API_KEY, PERPLEXI
 Click the **Open in Colab** badge above (or open
 [`notebooks/LMTrade_Colab.ipynb`](notebooks/LMTrade_Colab.ipynb)). Colab gives you
 a free GPU to serve the SLM; the notebook installs everything, optionally runs
-Ollama, serves the dashboard through Colab's port proxy, and can persist state to
-Google Drive. Note Colab is for **testing** — its runtime is ephemeral and idles
-out, so an always-on self-funding bot belongs on the Vast.ai path.
+Ollama, and can persist state to Google Drive.
+
+Because Colab can't reliably expose the web server's port, the dashboard there is
+rendered **inline with matplotlib** rather than served over HTTP:
+
+```python
+import lmtrade.viz as viz
+viz.show()                 # one-shot dashboard figure
+viz.live(interval=5)       # auto-refreshing dashboard
+viz.trades_df(); viz.activity_df(); viz.positions_df()   # feeds as DataFrames
+```
+
+The same panels render anywhere matplotlib works; `lmtrade viz` writes them to a
+PNG for headless use. Note Colab is for **testing** — its runtime is ephemeral and
+idles out, so an always-on self-funding bot belongs on the Vast.ai path.
 
 ## Configuration
 

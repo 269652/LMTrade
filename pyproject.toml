@@ -19,6 +19,7 @@ dependencies = [
     "httpx>=0.27",
     "numpy>=1.26",
     "pandas>=2.2",
+    "matplotlib>=3.8",
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
     "jinja2>=3.1",

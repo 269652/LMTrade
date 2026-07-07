@@ -147,6 +147,22 @@ def deploy(
 
 
 @app.command()
+def viz(
+    out: str = typer.Option("data/dashboard.png", help="Output PNG path."),
+):
+    """Render the dashboard to a PNG (headless). In notebooks use `lmtrade.viz.show()`."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from .viz.panels import dashboard_figure
+
+    settings = load_settings()
+    fig = dashboard_figure(settings.db_path)
+    out_path = settings.data_dir / "dashboard.png" if out == "data/dashboard.png" else out
+    fig.savefig(out_path, dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
+    console.print(f"[green]Dashboard written to[/green] {out_path}")
+
+
+@app.command()
 def reset(yes: bool = typer.Option(False, "--yes", help="Skip confirmation.")):
     """Wipe runtime state (database) and start a fresh account."""
     settings = load_settings()

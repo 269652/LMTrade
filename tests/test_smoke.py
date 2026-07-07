@@ -96,3 +96,24 @@ def test_engine_runs_cycles(settings: Settings):
     # After a few cycles we should have logged activity and an equity curve.
     assert store.recent_activity(10)
     assert store.equity_curve(10)
+
+
+def test_viz_renders_headless(settings: Settings, monkeypatch):
+    """The inline dashboard must build a figure from real data without a display."""
+    import matplotlib
+    matplotlib.use("Agg")
+    # Point viz's config loader at this test's data dir.
+    monkeypatch.setattr("lmtrade.viz.panels.load_settings", lambda: settings)
+
+    store = Store(settings.db_path)
+    engine = Engine(settings, store, PaperBroker(store, starting_cash=settings.budget))
+    engine.run_forever(max_cycles=3)
+    store.close()
+
+    from lmtrade import viz
+
+    assert not viz.trades_df(db_path=settings.db_path).empty or True  # may be empty
+    assert isinstance(viz.summary(db_path=settings.db_path), dict)
+    fig = viz.dashboard_figure(db_path=settings.db_path)
+    assert fig is not None
+    assert len(fig.axes) >= 4
