@@ -14,12 +14,13 @@ env/
 *.env
 !.env.example
 
-# Runtime state
-data/
+# Runtime state (anchored to repo root so they don't shadow the
+# src/lmtrade/data source package or any other same-named dir)
+/data/
 *.db
 *.sqlite
 *.sqlite3
-logs/
+/logs/
 *.log
 
 # Tooling
