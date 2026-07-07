@@ -1,5 +1,7 @@
 # ⚡ LMTrade
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/269652/LMTrade/blob/claude/trading-bot-hybrid-agent-tvs90n/notebooks/LMTrade_Colab.ipynb)
+
 A **self-sustaining trading bot** that fuses **LLMs, SLMs and classical financial
 models** into one decision, and is designed to **pay for its own GPU costs**.
 
@@ -67,6 +69,15 @@ Optional live data / models:
 pip install -e '.[data]'          # yfinance market data
 cp .env.example .env              # add OLLAMA_HOST, ANTHROPIC_API_KEY, PERPLEXITY_API_KEY…
 ```
+
+## Run on Google Colab
+
+Click the **Open in Colab** badge above (or open
+[`notebooks/LMTrade_Colab.ipynb`](notebooks/LMTrade_Colab.ipynb)). Colab gives you
+a free GPU to serve the SLM; the notebook installs everything, optionally runs
+Ollama, serves the dashboard through Colab's port proxy, and can persist state to
+Google Drive. Note Colab is for **testing** — its runtime is ephemeral and idles
+out, so an always-on self-funding bot belongs on the Vast.ai path.
 
 ## Configuration
 
