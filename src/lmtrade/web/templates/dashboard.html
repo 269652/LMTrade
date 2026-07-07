@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LMTrade · Dashboard</title>
+<style>
+  :root {
+    --bg:#0b0f14; --panel:#131a22; --panel2:#1a232e; --line:#243040;
+    --text:#e6edf3; --muted:#8b98a5; --green:#3fb950; --red:#f85149;
+    --blue:#58a6ff; --amber:#d29922; --accent:#7ee787;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; gap:14px; padding:14px 22px;
+           border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5;}
+  header h1 { font-size:17px; margin:0; letter-spacing:.5px; }
+  .badge { font-size:11px; padding:3px 8px; border-radius:20px; border:1px solid var(--line);
+           color:var(--muted); text-transform:uppercase; letter-spacing:.5px;}
+  .badge.paper { color:var(--blue); border-color:var(--blue); }
+  .badge.live { color:var(--red); border-color:var(--red); }
+  .spacer { flex:1; }
+  .dot { width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;
+         animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.3;} }
+  main { padding:22px; max-width:1200px; margin:0 auto; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .card .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+  .card .v { font-size:24px; font-weight:600; margin-top:6px; }
+  .v.pos { color:var(--green); } .v.neg { color:var(--red); }
+  .sub { color:var(--muted); font-size:12px; margin-top:2px; }
+  section { margin-top:26px; }
+  section h2 { font-size:13px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted);
+               border-bottom:1px solid var(--line); padding-bottom:8px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; font-size:11px; text-transform:uppercase; }
+  tr:hover td { background:var(--panel2); }
+  .pill { font-size:11px; padding:2px 7px; border-radius:5px; font-weight:600; }
+  .buy { background:rgba(63,185,80,.15); color:var(--green); }
+  .sell { background:rgba(248,81,73,.15); color:var(--red); }
+  .hold { background:rgba(139,152,165,.15); color:var(--muted); }
+  .kind { font-size:11px; color:var(--muted); text-transform:uppercase; }
+  .logs { background:#080b0f; border:1px solid var(--line); border-radius:8px; padding:12px;
+          font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px;
+          max-height:320px; overflow:auto; }
+  .log-INFO{color:var(--muted);} .log-WARNING{color:var(--amber);} .log-ERROR{color:var(--red);}
+  .tabs { display:flex; gap:6px; margin-top:20px; }
+  .tab { padding:7px 14px; border:1px solid var(--line); border-radius:8px; cursor:pointer;
+         color:var(--muted); background:var(--panel); font-size:13px; }
+  .tab.active { color:var(--text); border-color:var(--blue); }
+  .hidden { display:none; }
+  .econ-banner { margin-top:16px; padding:12px 16px; border-radius:10px; font-size:13px;
+                 border:1px solid var(--line); }
+  .econ-ok { background:rgba(63,185,80,.08); border-color:var(--green); }
+  .econ-warn { background:rgba(210,153,34,.08); border-color:var(--amber); }
+  .muted { color:var(--muted); }
+  svg { width:100%; height:120px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ LMTrade</h1>
+  <span id="mode" class="badge paper">paper</span>
+  <span class="spacer"></span>
+  <span class="muted" style="font-size:12px;"><span class="dot"></span> live · refresh 5s</span>
+</header>
+<main>
+  <div id="econ" class="econ-banner econ-ok">loading economics…</div>
+
+  <div class="grid" style="margin-top:16px;">
+    <div class="card"><div class="k">Net Worth</div><div class="v" id="net">—</div><div class="sub" id="pnl">—</div></div>
+    <div class="card"><div class="k">Cash</div><div class="v" id="cash">—</div><div class="sub" id="curr"></div></div>
+    <div class="card"><div class="k">Positions</div><div class="v" id="npos">—</div><div class="sub">open</div></div>
+    <div class="card"><div class="k">GPU Runway</div><div class="v" id="runway">—</div><div class="sub">hours funded</div></div>
+    <div class="card"><div class="k">Compute Spent</div><div class="v" id="compute">—</div><div class="sub">GPU + inference (USD)</div></div>
+  </div>
+
+  <section>
+    <h2>Equity Curve</h2>
+    <div class="card"><svg id="chart" viewBox="0 0 600 120" preserveAspectRatio="none"></svg></div>
+  </section>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="positions">Positions</div>
+    <div class="tab" data-tab="trades">Trades</div>
+    <div class="tab" data-tab="activity">Activity</div>
+    <div class="tab" data-tab="logs">Logs</div>
+  </div>
+
+  <section id="tab-positions">
+    <table><thead><tr><th>Symbol</th><th>Qty</th><th>Avg Price</th></tr></thead>
+      <tbody id="positions"></tbody></table>
+  </section>
+
+  <section id="tab-trades" class="hidden">
+    <table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Fee</th><th>Conf</th></tr></thead>
+      <tbody id="trades"></tbody></table>
+  </section>
+
+  <section id="tab-activity" class="hidden">
+    <table><thead><tr><th>Time</th><th>Kind</th><th>Symbol</th><th>Summary</th></tr></thead>
+      <tbody id="activity"></tbody></table>
+  </section>
+
+  <section id="tab-logs" class="hidden">
+    <div class="logs" id="logs"></div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmtrade"
+version = "0.1.0"
+description = "Self-sustaining trading bot fusing LLMs, SLMs and financial models, designed to pay for its own GPU costs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "LMTrade" }]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13.7",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+# Live market data
+data = ["yfinance>=0.2.40"]
+# Live Trade Republic execution (unofficial API — opt-in, use at your own risk)
+traderepublic = ["pytr>=0.2.0"]
+# Local SLM inference helpers
+local = ["ollama>=0.3.0"]
+dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10"]
+
+[project.scripts]
+lmtrade = "lmtrade.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

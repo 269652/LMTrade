@@ -1,0 +1,225 @@
+"""Concrete model providers.
+
+- HeuristicProvider: pure financial-model signal (no external calls, zero cost).
+- LocalSLMProvider:  small model via Ollama on the Vast.ai GPU box.
+- CloudLLMProvider:  hosted LLM (Anthropic) for harder judgment calls.
+- PerplexityProvider: web-grounded research/news sentiment.
+
+The SLM/cloud/perplexity providers degrade gracefully to a neutral `hold`
+signal when their key/host is missing, so the stack never blocks the loop.
+"""
+from __future__ import annotations
+
+import json
+import re
+
+import httpx
+
+from ..config import Settings, secret
+from .base import ModelProvider, Signal
+
+_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _parse_decision(text: str, provider: str, cost: float) -> Signal:
+    """Coerce a model's free-text answer into a Signal. Accepts JSON or falls
+    back to keyword scanning."""
+    m = _JSON_RE.search(text or "")
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            direction = str(obj.get("direction", "hold")).lower()
+            if direction not in ("buy", "sell", "hold"):
+                direction = "hold"
+            conf = float(obj.get("confidence", 0.5))
+            return Signal(provider, direction, max(0.0, min(1.0, conf)),
+                          str(obj.get("rationale", ""))[:400], cost)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+    low = (text or "").lower()
+    if "buy" in low and "sell" not in low:
+        return Signal(provider, "buy", 0.6, text[:200], cost)
+    if "sell" in low and "buy" not in low:
+        return Signal(provider, "sell", 0.6, text[:200], cost)
+    return Signal(provider, "hold", 0.5, text[:200], cost)
+
+
+def _prompt(symbol: str, context: dict) -> str:
+    ind = context.get("indicators", {})
+    news = context.get("research", "")
+    return (
+        f"You are a disciplined trading analyst for a tiny (~10 EUR) account.\n"
+        f"Instrument: {symbol}\n"
+        f"Indicators: {json.dumps(ind, default=str)}\n"
+        f"Research notes: {news[:800]}\n\n"
+        "Decide the action for the NEXT step. Respond ONLY with JSON: "
+        '{"direction":"buy|sell|hold","confidence":0..1,"rationale":"one sentence"}'
+    )
+
+
+class HeuristicProvider(ModelProvider):
+    """Deterministic financial-model vote from the indicator snapshot."""
+
+    name = "heuristic"
+
+    def analyze(self, symbol: str, context: dict) -> Signal:
+        ind = context.get("indicators", {})
+        last = ind.get("last")
+        sma_fast, sma_slow, rsi = ind.get("sma_fast"), ind.get("sma_slow"), ind.get("rsi")
+        if last is None or sma_fast is None or sma_slow is None:
+            return Signal(self.name, "hold", 0.5, "insufficient history", 0.0)
+
+        score = 0.0
+        reasons = []
+        if sma_fast > sma_slow:
+            score += 0.4
+            reasons.append("fast SMA above slow (uptrend)")
+        else:
+            score -= 0.4
+            reasons.append("fast SMA below slow (downtrend)")
+        if rsi is not None:
+            if rsi < 30:
+                score += 0.3
+                reasons.append(f"RSI {rsi:.0f} oversold")
+            elif rsi > 70:
+                score -= 0.3
+                reasons.append(f"RSI {rsi:.0f} overbought")
+
+        direction = "buy" if score > 0.15 else "sell" if score < -0.15 else "hold"
+        return Signal(self.name, direction, min(1.0, abs(score) + 0.4),
+                      "; ".join(reasons), 0.0)
+
+
+class LocalSLMProvider(ModelProvider):
+    """Small language model served by Ollama (typically on the Vast.ai GPU)."""
+
+    name = "slm"
+
+    def __init__(self, settings: Settings):
+        self.host = secret("OLLAMA_HOST") or "http://localhost:11434"
+        self.model = settings.model.slm_model
+        self.cost = settings.economics.inference_cost.get("slm", 0.0002)
+
+    def available(self) -> bool:
+        try:
+            r = httpx.get(f"{self.host}/api/tags", timeout=2.0)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def analyze(self, symbol: str, context: dict) -> Signal:
+        try:
+            r = httpx.post(
+                f"{self.host}/api/generate",
+                json={"model": self.model, "prompt": _prompt(symbol, context), "stream": False},
+                timeout=30.0,
+            )
+            r.raise_for_status()
+            text = r.json().get("response", "")
+            return _parse_decision(text, self.name, self.cost)
+        except Exception as exc:  # noqa: BLE001
+            return Signal(self.name, "hold", 0.5, f"slm unavailable: {exc}", 0.0)
+
+
+class CloudLLMProvider(ModelProvider):
+    """Hosted Anthropic model for higher-quality judgment on close calls."""
+
+    name = "cloud"
+
+    def __init__(self, settings: Settings):
+        self.key = secret("ANTHROPIC_API_KEY")
+        self.model = settings.model.cloud_model
+        self.cost = settings.economics.inference_cost.get("cloud", 0.004)
+
+    def available(self) -> bool:
+        return bool(self.key)
+
+    def analyze(self, symbol: str, context: dict) -> Signal:
+        if not self.key:
+            return Signal(self.name, "hold", 0.5, "no ANTHROPIC_API_KEY", 0.0)
+        try:
+            r = httpx.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self.key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "max_tokens": 200,
+                    "messages": [{"role": "user", "content": _prompt(symbol, context)}],
+                },
+                timeout=30.0,
+            )
+            r.raise_for_status()
+            blocks = r.json().get("content", [])
+            text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+            return _parse_decision(text, self.name, self.cost)
+        except Exception as exc:  # noqa: BLE001
+            return Signal(self.name, "hold", 0.5, f"cloud error: {exc}", 0.0)
+
+
+class PerplexityProvider(ModelProvider):
+    """Web-grounded research: fetches recent news/sentiment for the instrument."""
+
+    name = "perplexity"
+
+    def __init__(self, settings: Settings):
+        self.key = secret("PERPLEXITY_API_KEY")
+        self.model = settings.model.perplexity_model
+        self.cost = settings.economics.inference_cost.get("perplexity", 0.005)
+
+    def available(self) -> bool:
+        return bool(self.key)
+
+    def research(self, symbol: str) -> tuple[str, float]:
+        """Return (research_text, cost). Empty text if unavailable."""
+        if not self.key:
+            return "", 0.0
+        try:
+            r = httpx.post(
+                "https://api.perplexity.ai/chat/completions",
+                headers={"Authorization": f"Bearer {self.key}",
+                         "content-type": "application/json"},
+                json={
+                    "model": self.model,
+                    "messages": [{
+                        "role": "user",
+                        "content": (
+                            f"In 3 sentences: latest market-moving news and sentiment for "
+                            f"{symbol}. End with SENTIMENT: bullish|bearish|neutral."
+                        ),
+                    }],
+                },
+                timeout=30.0,
+            )
+            r.raise_for_status()
+            text = r.json()["choices"][0]["message"]["content"]
+            return text, self.cost
+        except Exception as exc:  # noqa: BLE001
+            return f"(research unavailable: {exc})", 0.0
+
+    def analyze(self, symbol: str, context: dict) -> Signal:
+        text = context.get("research", "")
+        low = text.lower()
+        if "bullish" in low:
+            return Signal(self.name, "buy", 0.65, text[:300], 0.0)
+        if "bearish" in low:
+            return Signal(self.name, "sell", 0.65, text[:300], 0.0)
+        return Signal(self.name, "hold", 0.5, text[:300] or "no research", 0.0)
+
+
+def build_providers(settings: Settings) -> dict[str, ModelProvider]:
+    """Instantiate the providers named in the configured model stack."""
+    registry = {
+        "heuristic": lambda: HeuristicProvider(),
+        "slm": lambda: LocalSLMProvider(settings),
+        "cloud": lambda: CloudLLMProvider(settings),
+        "perplexity": lambda: PerplexityProvider(settings),
+    }
+    out: dict[str, ModelProvider] = {}
+    for name in settings.model.stack:
+        if name in registry:
+            out[name] = registry[name]()
+    return out

@@ -1,0 +1,50 @@
+# LMTrade default configuration.
+# Environment variables (LMTRADE_*) override anything set here.
+# See .env.example for the full list.
+
+mode: paper                # paper | live
+budget: 10.0               # starting cash, account currency
+currency: EUR
+
+universe:                  # instruments to trade
+  - AAPL
+  - MSFT
+  - SPY
+
+loop:
+  interval_seconds: 60     # how often the engine evaluates the universe
+  max_positions: 2         # cap concurrent open positions (tiny budget!)
+
+model:
+  stack: [heuristic, slm, perplexity]   # providers consulted, in order
+  slm_model: "qwen2.5:1.5b"
+  cloud_model: "claude-haiku-4-5-20251001"
+  perplexity_model: "sonar"
+  # Weight each provider's vote in the fusion decision
+  weights:
+    heuristic: 1.0
+    slm: 1.0
+    cloud: 1.5
+    perplexity: 1.2
+
+risk:
+  max_position_fraction: 0.5   # no single position > 50% of equity
+  stop_loss_pct: 0.05          # 5% hard stop
+  take_profit_pct: 0.08        # 8% target
+  min_confidence: 0.55         # skip trades below this fused confidence
+
+economics:
+  gpu_usd_per_hour: 0.20       # Vast.ai hourly burn
+  min_runway_hours: 6          # halt if projected runway < this
+  # Assumed marginal inference costs (USD) used for pre-trade budgeting
+  inference_cost:
+    slm: 0.0002
+    cloud: 0.004
+    perplexity: 0.005
+
+web:
+  host: "0.0.0.0"
+  port: 8000
+
+data:
+  provider: auto             # auto | yfinance | synthetic
