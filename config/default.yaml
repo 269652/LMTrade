@@ -7,15 +7,21 @@ budget: 100.0              # starting cash, account currency (paper default;
                            # ~1 EUR flat fees are a 10% drag at 10 EUR scale)
 currency: EUR
 
-universe:                  # instruments to trade
+universe:                  # instruments to trade. Mixes US equities (live
+                           # only during NYSE hours + extended hours) with
+                           # crypto (trades 24/7) so the feed never fully
+                           # goes stale overnight or outside market hours.
   - AAPL
   - MSFT
   - SPY
+  - BTC-USD
+  - ETH-USD
 
 loop:
   interval_seconds: 15     # high-cadence intraday loop (TR can't do true HFT;
                            # sub-second execution is impossible via its API)
-  max_positions: 2         # cap concurrent open positions (tiny budget!)
+  max_positions: 5         # cap concurrent open positions (one per universe
+                           # symbol at most — each symbol only ever holds one)
 
 model:
   stack: [heuristic, slm, perplexity]   # providers consulted, in order

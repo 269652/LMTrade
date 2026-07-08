@@ -1,5 +1,9 @@
 """Tests for the httpx-based Yahoo Finance data path in data/market.py.
 
+Also covers extended-hours (pre/post market) requests: regular sessions are
+closed most of the day/night, so 1-minute intraday fetches must ask Yahoo for
+extended-hours bars too, or the feed goes stale outside 9:30-16:00 ET.
+
 `yfinance`'s curl_cffi backend does browser TLS-fingerprint impersonation,
 which this sandbox's MITM egress proxy cannot pass through (connection reset
 during handshake — confirmed against the real proxy). Plain httpx against
@@ -11,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from lmtrade.data.market import MarketData
+from lmtrade.data.market import MarketData, default_yahoo_fetcher
 
 
 def fake_fetcher_factory(calls: list, closes_by_key: dict | None = None,
@@ -97,6 +101,50 @@ class TestYahooQuote:
         md = MarketData("synthetic", lookback=10, fetcher=fetcher)
         md.quote("AAPL")
         assert calls == []
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _chart_payload(closes):
+    return {"chart": {"result": [
+        {"indicators": {"quote": [{"close": closes}]}}
+    ]}}
+
+
+class TestDefaultYahooFetcherExtendedHours:
+    def test_intraday_1m_request_includes_prepost(self, monkeypatch):
+        captured = {}
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            captured["params"] = params
+            return FakeResponse(_chart_payload([100.0, 101.0]))
+
+        monkeypatch.setattr("httpx.get", fake_get)
+        default_yahoo_fetcher("AAPL", "1d", "1m")
+        assert captured["params"].get("includePrePost") == "true"
+
+    def test_daily_request_does_not_need_prepost(self, monkeypatch):
+        """Daily bars are session closes; extended-hours doesn't apply, but
+        passing the flag must not be required (harmless either way)."""
+        captured = {}
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            captured["params"] = params
+            return FakeResponse(_chart_payload([100.0, 101.0]))
+
+        monkeypatch.setattr("httpx.get", fake_get)
+        default_yahoo_fetcher("AAPL", "3mo", "1d")
+        assert captured["params"]["range"] == "3mo"
+        assert captured["params"]["interval"] == "1d"
 
 
 class TestDefaultFetcherIsNotUsedInTests:

@@ -30,12 +30,23 @@ class Quote:
 
 
 def default_yahoo_fetcher(symbol: str, range_: str, interval: str) -> list[float]:
-    """Fetch closes from Yahoo Finance's public chart API via plain httpx."""
+    """Fetch closes from Yahoo Finance's public chart API via plain httpx.
+
+    Regular exchange sessions are closed most of the day (and EU sessions
+    close even earlier than the US), so 1-minute intraday requests ask for
+    extended-hours (pre/post market) bars too — otherwise the feed goes
+    stale outside 9:30-16:00 ET and the bot would be trading on frozen
+    prices without knowing it. Daily bars are unaffected either way.
+    """
     import httpx
+
+    params = {"range": range_, "interval": interval}
+    if interval == "1m":
+        params["includePrePost"] = "true"
 
     r = httpx.get(
         f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
-        params={"range": range_, "interval": interval},
+        params=params,
         headers={"User-Agent": "Mozilla/5.0"},
         timeout=15.0,
     )
