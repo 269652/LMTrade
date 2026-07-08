@@ -21,8 +21,9 @@ class Quote:
 
 
 class MarketData:
-    def __init__(self, provider: str = "auto", lookback: int = 60):
+    def __init__(self, provider: str = "auto", lookback: int = 60, intraday: bool = False):
         self.lookback = lookback
+        self.intraday = intraday
         self.provider = self._resolve(provider)
 
     def _resolve(self, provider: str) -> str:
@@ -47,7 +48,12 @@ class MarketData:
     def _yf_quote(self, symbol: str) -> Quote:
         import yfinance as yf
 
-        hist = yf.Ticker(symbol).history(period="3mo", interval="1d")
+        if self.intraday:
+            hist = yf.Ticker(symbol).history(period="1d", interval="1m")
+            if hist.empty:  # market closed / no intraday bars -> daily fallback
+                hist = yf.Ticker(symbol).history(period="3mo", interval="1d")
+        else:
+            hist = yf.Ticker(symbol).history(period="3mo", interval="1d")
         closes = [float(x) for x in hist["Close"].dropna().tolist()][-self.lookback:]
         if not closes:
             raise ValueError("no data")
@@ -56,10 +62,12 @@ class MarketData:
     # -- synthetic ------------------------------------------------------------
     def _synthetic_quote(self, symbol: str) -> Quote:
         """Deterministic-ish random walk seeded by symbol + coarse time, so the
-        series evolves between loops but is reproducible within a minute."""
+        series evolves between loops but is reproducible within a bucket
+        (10s buckets intraday, 60s otherwise)."""
         seed = int(hashlib.sha256(symbol.encode()).hexdigest(), 16) % 10_000
         base = 50 + (seed % 200)
-        t0 = int(time.time() // 60)     # advances each minute
+        bucket = 10 if self.intraday else 60
+        t0 = int(time.time() // bucket)
         closes: list[float] = []
         price = float(base)
         for i in range(self.lookback):

@@ -76,6 +76,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def costs() -> JSONResponse:
         return JSONResponse(store.total_costs())
 
+    @app.get("/api/options")
+    def options() -> JSONResponse:
+        return JSONResponse({
+            "open": store.open_options(),
+            "closed": store.closed_options(50),
+        })
+
+    @app.get("/api/leaderboard")
+    def leaderboard() -> JSONResponse:
+        genomes = store.get_meta("genomes", []) or []
+        rows = [
+            {"id": g["id"], "strategy": g["strategy"], "params": g["params"],
+             "trades": g["trades"], "pnl": round(g["pnl"], 4),
+             "fitness": round(g["pnl"] / g["trades"], 5) if g["trades"] else 0.01}
+            for g in genomes
+        ]
+        rows.sort(key=lambda r: r["fitness"], reverse=True)
+        return JSONResponse(rows)
+
+    @app.get("/api/benchmark")
+    def benchmark() -> JSONResponse:
+        return JSONResponse({
+            "curve": store.benchmark_curve(500),
+            "alpha": store.get_meta("alpha"),
+            "entry": store.get_meta("benchmark_entry"),
+        })
+
+    @app.get("/api/news")
+    def news() -> JSONResponse:
+        return JSONResponse(store.recent_news(50))
+
     @app.get("/healthz")
     def healthz() -> dict:
         return {"ok": True}

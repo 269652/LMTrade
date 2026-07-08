@@ -50,8 +50,11 @@ class FusionEngine:
         self.providers = providers
         self.weights = settings.model.weights
 
-    def decide(self, quote: Quote) -> Decision:
+    def decide(self, quote: Quote, extra_signals: list[Signal] | None = None,
+               context_extra: dict | None = None) -> Decision:
         context: dict = {"indicators": indicator_snapshot(quote.history)}
+        if context_extra:
+            context.update(context_extra)
 
         # Research first (Perplexity) so its notes feed the SLM/cloud prompts.
         cost = 0.0
@@ -61,7 +64,7 @@ class FusionEngine:
             context["research"] = research
             cost += rcost
 
-        signals: list[Signal] = []
+        signals: list[Signal] = list(extra_signals or [])
         for name, provider in self.providers.items():
             try:
                 sig = provider.analyze(quote.symbol, context)

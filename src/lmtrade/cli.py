@@ -89,6 +89,9 @@ def status():
     cash = float(store.get_meta("cash", settings.budget))
     positions = store.positions()
     pos_value = sum(p.qty * p.avg_price for p in positions)
+    # Value open options at cost basis (entry premium) — conservative but keeps
+    # premiums-at-risk in net worth without needing a live market snapshot.
+    pos_value += sum(o["contracts"] * o["entry_premium"] for o in store.open_options())
     accountant = CostAccountant(settings, store)
     econ = accountant.snapshot(cash, pos_value)
 
@@ -103,6 +106,9 @@ def status():
     t.add_row("Inference cost", f"${econ.inference_cost_usd:.4f}")
     t.add_row("Runway", f"{econ.runway_hours:.1f} h")
     t.add_row("Self-sustaining", "✅ yes" if econ.self_sustaining else "⏳ not yet")
+    alpha = store.get_meta("alpha")
+    t.add_row("Alpha vs retail",
+              f"{alpha:+.3f} {settings.currency}" if alpha is not None else "—")
     console.print(t)
 
     if positions:
@@ -112,6 +118,32 @@ def status():
         for p in positions:
             pt.add_row(p.symbol, f"{p.qty:.4f}", f"{p.avg_price:.2f}")
         console.print(pt)
+
+    open_opts = store.open_options()
+    ot = Table(title="Open Options")
+    ot.add_column("Underlying"); ot.add_column("Type"); ot.add_column("Strike", justify="right")
+    ot.add_column("Contracts", justify="right"); ot.add_column("Entry", justify="right")
+    for o in open_opts:
+        ot.add_row(o["underlying"], o["kind"], f"{o['strike']:.2f}",
+                   f"{o['contracts']:.3f}", f"{o['entry_premium']:.3f}")
+    if not open_opts:
+        ot.add_row("—", "—", "—", "—", "—")
+    console.print(ot)
+
+    genomes = store.get_meta("genomes", []) or []
+    lt = Table(title="Strategy Leaderboard (learning)")
+    lt.add_column("Strategy"); lt.add_column("Genome"); lt.add_column("Trades", justify="right")
+    lt.add_column("P&L", justify="right"); lt.add_column("Fitness", justify="right")
+    ranked = sorted(genomes,
+                    key=lambda g: (g["pnl"] / g["trades"]) if g["trades"] else 0.01,
+                    reverse=True)
+    for g in ranked[:8]:
+        fit = (g["pnl"] / g["trades"]) if g["trades"] else 0.01
+        lt.add_row(g["strategy"], g["id"], str(g["trades"]),
+                   f"{g['pnl']:+.3f}", f"{fit:+.4f}")
+    if not genomes:
+        lt.add_row("—", "—", "—", "—", "—")
+    console.print(lt)
     store.close()
 
 
@@ -144,6 +176,23 @@ def deploy(
     burn = current_hourly_burn()
     if burn is not None:
         console.print(f"Current Vast.ai burn: [bold]${burn}/hr[/bold]")
+
+
+@app.command()
+def analyze():
+    """Run the daily Claude strategy review on demand (needs ANTHROPIC_API_KEY)."""
+    from .research.daily import DailyAnalyst
+
+    settings = load_settings()
+    store = Store(settings.db_path)
+    analyst = DailyAnalyst(store, settings)
+    result = analyst.run()
+    if result is None:
+        console.print("[yellow]Analysis unavailable — set ANTHROPIC_API_KEY "
+                      "(or the response was unusable).[/yellow]")
+    else:
+        console.print_json(json.dumps(result))
+    store.close()
 
 
 @app.command()

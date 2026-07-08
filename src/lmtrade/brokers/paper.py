@@ -33,6 +33,16 @@ class PaperBroker(Broker):
         pos = self.store.position(symbol)
         return pos.avg_price if pos else 0.0
 
+    def adjust_cash(self, delta: float) -> bool:
+        """Credit (positive) or debit (negative) cash directly — used by the
+        options book for premiums and proceeds. Debits that would overdraw are
+        rejected."""
+        new = self.cash() + delta
+        if new < -1e-9:
+            return False
+        self._set_cash(new)
+        return True
+
     def buy(self, symbol: str, qty: float, price: float) -> OrderResult:
         cost = qty * price + self.fee
         if cost > self.cash() + 1e-9:

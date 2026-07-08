@@ -105,6 +105,9 @@ def dashboard_figure(db_path=None, figsize=(13, 8)):
     cash = float(store.get_meta("cash", settings.budget))
     starting = float(store.get_meta("starting_cash", settings.budget))
     curve = store.equity_curve(500)
+    bench = store.benchmark_curve(500)
+    alpha = store.get_meta("alpha")
+    open_opts = store.open_options()
     costs = store.total_costs()
     positions = store.positions()
     mode = store.get_meta("mode", settings.mode)
@@ -128,13 +131,23 @@ def dashboard_figure(db_path=None, figsize=(13, 8)):
         ys = [p["equity"] for p in curve]
         up = ys[-1] >= ys[0]
         color = _COLORS["green"] if up else _COLORS["red"]
-        ax_eq.plot(xs, ys, color=color, lw=2)
+        ax_eq.plot(xs, ys, color=color, lw=2, label="bot")
         ax_eq.fill_between(xs, ys, min(ys), color=color, alpha=0.12)
         ax_eq.axhline(starting, color=_COLORS["muted"], ls="--", lw=1, alpha=0.6)
     else:
         ax_eq.text(0.5, 0.5, "Waiting for equity data…", ha="center", va="center",
                    color=_COLORS["muted"], transform=ax_eq.transAxes)
-    ax_eq.set_title(f"Equity Curve ({cur})", color=_COLORS["text"], loc="left", fontweight="bold")
+    if bench:
+        bx = [pd.to_datetime(p["ts"], unit="s") for p in bench]
+        by = [p["equity"] for p in bench]
+        ax_eq.plot(bx, by, color=_COLORS["blue"], lw=1.5, ls=":",
+                   label="benchmark (buy&hold)")
+    if (len(curve) >= 2) or bench:
+        ax_eq.legend(loc="upper left", frameon=False, fontsize=8,
+                     labelcolor=_COLORS["muted"])
+    alpha_txt = f"  ·  alpha {alpha:+.3f} {cur}" if alpha is not None else ""
+    ax_eq.set_title(f"Equity Curve ({cur}) vs Retail Benchmark{alpha_txt}",
+                    color=_COLORS["text"], loc="left", fontweight="bold")
     ax_eq.grid(True, color=_COLORS["line"], alpha=0.3)
 
     # -- KPI / economics panel (mid-left, text) ------------------------------
@@ -177,18 +190,22 @@ def dashboard_figure(db_path=None, figsize=(13, 8)):
         ax_cost.axis("off")
     ax_cost.set_title("Compute Spend (USD)", color=_COLORS["text"], loc="left", fontweight="bold")
 
-    # -- Positions (mid-right) ------------------------------------------------
+    # -- Positions incl. options (mid-right) -----------------------------------
     ax_pos = fig.add_subplot(gs[1, 2])
-    if positions:
-        syms = [p.symbol for p in positions]
-        notion = [p.qty * p.avg_price for p in positions]
-        ax_pos.barh(syms, notion, color=_COLORS["blue"])
+    labels: list[str] = [p.symbol for p in positions]
+    notion: list[float] = [p.qty * p.avg_price for p in positions]
+    for o in open_opts:
+        labels.append(f"{o['underlying']} {o['kind'][0].upper()}{o['strike']:g}")
+        notion.append(o["contracts"] * o["entry_premium"])
+    if labels:
+        ax_pos.barh(labels, notion, color=_COLORS["blue"])
         ax_pos.set_xlabel(cur)
     else:
         ax_pos.text(0.5, 0.5, "no open positions", ha="center", va="center",
                     color=_COLORS["muted"], transform=ax_pos.transAxes)
         ax_pos.axis("off")
-    ax_pos.set_title("Positions", color=_COLORS["text"], loc="left", fontweight="bold")
+    ax_pos.set_title("Positions & Options", color=_COLORS["text"], loc="left",
+                     fontweight="bold")
 
     # -- Recent trades table (bottom, full width) ----------------------------
     ax_tr = fig.add_subplot(gs[2, :]); ax_tr.axis("off")

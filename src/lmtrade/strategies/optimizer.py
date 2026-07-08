@@ -1,0 +1,133 @@
+"""Evolutionary strategy learner.
+
+Maintains a population of parameter genomes across the strategy library. The
+engine asks `select()` for the genome to trade with (epsilon-greedy: mostly the
+best fitness, sometimes explore), attributes each closed trade's realized P&L
+back via `record_result()`, and periodically calls `evolve()` — which replaces
+the worst performer with a mutated copy of the best. Over weeks of paper
+trading this is how the bot "learns" which strategies and parameters work.
+
+Everything is persisted in the Store (meta key "genomes") so learning survives
+restarts and is visible to the dashboard.
+"""
+from __future__ import annotations
+
+import random
+import uuid
+from dataclasses import asdict, dataclass, field
+
+from ..core.state import Store
+from .library import STRATEGIES, signal_for
+
+GENOMES_KEY = "genomes"
+
+
+@dataclass
+class Genome:
+    id: str
+    strategy: str
+    params: dict
+    trades: int = 0
+    pnl: float = 0.0
+
+    @property
+    def fitness(self) -> float:
+        """Average P&L per trade; unproven genomes get a small optimistic prior
+        so they get explored before being written off."""
+        if self.trades == 0:
+            return 0.01
+        return self.pnl / self.trades
+
+    def signal(self, history: list[float]) -> tuple[str, float]:
+        return signal_for(self.strategy, history, self.params)
+
+
+class StrategyOptimizer:
+    def __init__(
+        self, store: Store, population: int = 8, epsilon: float = 0.2,
+        mutation_scale: float = 0.3, rng: random.Random | None = None,
+    ):
+        self.store = store
+        self.population = population
+        self.epsilon = epsilon
+        self.mutation_scale = mutation_scale
+        self.rng = rng or random.Random()
+        if store.get_meta(GENOMES_KEY) is None:
+            self._save(self._seed_population())
+
+    # -- persistence ------------------------------------------------------------
+    def genomes(self) -> list[Genome]:
+        raw = self.store.get_meta(GENOMES_KEY, [])
+        return [Genome(**g) for g in raw]
+
+    def _save(self, genomes: list[Genome]) -> None:
+        self.store.set_meta(GENOMES_KEY, [asdict(g) for g in genomes])
+
+    # -- population -------------------------------------------------------------
+    def _seed_population(self) -> list[Genome]:
+        names = list(STRATEGIES)
+        out: list[Genome] = []
+        for i in range(self.population):
+            name = names[i % len(names)]
+            params = dict(STRATEGIES[name].default_params)
+            if i >= len(names):        # later seeds start mutated for diversity
+                params = self._mutate_params(name, params)
+            out.append(Genome(id=uuid.uuid4().hex[:8], strategy=name, params=params))
+        return out
+
+    def _mutate_params(self, strategy: str, params: dict) -> dict:
+        spec = STRATEGIES[strategy]
+        out = dict(params)
+        for key, (lo, hi) in spec.bounds.items():
+            if self.rng.random() < 0.7:
+                cur = float(out.get(key, (lo + hi) / 2))
+                jitter = (hi - lo) * self.mutation_scale * (self.rng.random() * 2 - 1)
+                val = max(lo, min(hi, cur + jitter))
+                out[key] = int(round(val)) if isinstance(lo, int) else round(val, 5)
+        return out
+
+    # -- learning API -------------------------------------------------------------
+    def select(self) -> Genome:
+        """Epsilon-greedy: usually the highest-fitness genome, sometimes explore."""
+        genomes = self.genomes()
+        if self.rng.random() < self.epsilon:
+            return self.rng.choice(genomes)
+        return max(genomes, key=lambda g: g.fitness)
+
+    def record_result(self, genome_id: str, pnl: float) -> None:
+        genomes = self.genomes()
+        for g in genomes:
+            if g.id == genome_id:
+                g.trades += 1
+                g.pnl += pnl
+                break
+        self._save(genomes)
+
+    def evolve(self, min_trades: int = 3) -> Genome | None:
+        """Replace the worst proven genome with a mutated copy of the best.
+        Returns the new genome, or None if not enough evidence yet."""
+        genomes = self.genomes()
+        proven = [g for g in genomes if g.trades >= min_trades]
+        if len(proven) < 2:
+            return None
+        best = max(proven, key=lambda g: g.fitness)
+        worst = min(proven, key=lambda g: g.fitness)
+        if best.id == worst.id:
+            return None
+        mutant = Genome(
+            id=uuid.uuid4().hex[:8],
+            strategy=best.strategy,
+            params=self._mutate_params(best.strategy, best.params),
+        )
+        genomes = [g for g in genomes if g.id != worst.id] + [mutant]
+        self._save(genomes)
+        return mutant
+
+    def leaderboard(self) -> list[dict]:
+        """Fitness-sorted view for the dashboard/status output."""
+        return [
+            {"id": g.id, "strategy": g.strategy, "params": g.params,
+             "trades": g.trades, "pnl": round(g.pnl, 4),
+             "fitness": round(g.fitness, 5)}
+            for g in sorted(self.genomes(), key=lambda g: g.fitness, reverse=True)
+        ]

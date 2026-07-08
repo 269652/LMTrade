@@ -58,6 +58,32 @@ class LoopConfig(BaseModel):
     max_positions: int = 2
 
 
+class ResearchConfig(BaseModel):
+    news_interval_minutes: int = 60          # hourly Perplexity news
+    daily_analysis_interval_hours: int = 24  # daily Claude strategy review
+
+
+class OptionsConfig(BaseModel):
+    enabled: bool = True
+    expiry_days: float = 7.0
+    max_option_fraction: float = 0.3   # max fraction of equity in one premium
+    take_profit_pct: float = 0.5       # +50% premium -> take profit
+    stop_loss_pct: float = 0.4         # -40% premium -> cut
+    min_hours_to_expiry: float = 24.0  # force-close inside this window
+
+
+class LearningConfig(BaseModel):
+    enabled: bool = True
+    population: int = 8
+    epsilon: float = 0.2
+    mutation_scale: float = 0.3
+    evolve_every_trades: int = 10      # run evolution after N closed trades
+
+
+class BenchmarkConfig(BaseModel):
+    symbol: str = "SPY"                # "retail baseline": buy-and-hold SPY
+
+
 class WebConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8000
@@ -65,6 +91,7 @@ class WebConfig(BaseModel):
 
 class DataConfig(BaseModel):
     provider: str = "auto"
+    intraday: bool = True     # 1m bars (yfinance) / 10s synthetic ticks
 
 
 class Settings(BaseModel):
@@ -76,6 +103,10 @@ class Settings(BaseModel):
     model: ModelConfig = ModelConfig()
     risk: RiskConfig = RiskConfig()
     economics: EconomicsConfig = EconomicsConfig()
+    research: ResearchConfig = ResearchConfig()
+    options: OptionsConfig = OptionsConfig()
+    learning: LearningConfig = LearningConfig()
+    benchmark: BenchmarkConfig = BenchmarkConfig()
     web: WebConfig = WebConfig()
     data: DataConfig = DataConfig()
 

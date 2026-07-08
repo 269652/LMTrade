@@ -1,0 +1,129 @@
+"""Tests for the scheduler (core/scheduler.py), hourly Perplexity news service
+(research/news.py) and daily Claude strategy analyst (research/daily.py).
+Written before implementation per strict TDD. All offline — external calls are
+injected fakes."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from lmtrade.config import Settings
+from lmtrade.core.scheduler import Scheduler
+from lmtrade.core.state import Store
+from lmtrade.research.daily import DailyAnalyst
+from lmtrade.research.news import NewsService
+
+
+@pytest.fixture()
+def store(tmp_path: Path):
+    s = Store(tmp_path / "t.db")
+    yield s
+    s.close()
+
+
+@pytest.fixture()
+def settings(tmp_path: Path) -> Settings:
+    s = Settings(mode="paper", budget=10.0, universe=["AAPL"],
+                 data={"provider": "synthetic"})
+    s.data_dir = tmp_path
+    return s
+
+
+class TestScheduler:
+    def test_first_call_is_due_then_not(self, store):
+        clock = [1000.0]
+        sched = Scheduler(store, now=lambda: clock[0])
+        assert sched.due("news", 3600) is True
+        assert sched.due("news", 3600) is False      # just ran
+        clock[0] += 3601
+        assert sched.due("news", 3600) is True       # interval elapsed
+
+    def test_jobs_are_independent(self, store):
+        clock = [1000.0]
+        sched = Scheduler(store, now=lambda: clock[0])
+        assert sched.due("a", 60) is True
+        assert sched.due("b", 60) is True            # different job, own timer
+
+    def test_persists_across_instances(self, store):
+        clock = [1000.0]
+        Scheduler(store, now=lambda: clock[0]).due("news", 3600)
+        sched2 = Scheduler(store, now=lambda: clock[0])
+        assert sched2.due("news", 3600) is False     # last-run survived
+
+
+class TestNewsService:
+    def test_fetches_and_caches(self, store, settings):
+        calls = []
+
+        def fake_fetch(symbol):
+            calls.append(symbol)
+            return f"{symbol} rallies on earnings. SENTIMENT: bullish", 0.005
+
+        clock = [1000.0]
+        svc = NewsService(store, settings, fetcher=fake_fetch, now=lambda: clock[0])
+        item = svc.get("AAPL")
+        assert item["sentiment"] == "bullish"
+        assert "rallies" in item["text"]
+        assert calls == ["AAPL"]
+
+        # Within the freshness window: served from cache, no second fetch.
+        item2 = svc.get("AAPL")
+        assert calls == ["AAPL"]
+        assert item2["text"] == item["text"]
+
+        # After the window: refetched.
+        clock[0] += settings.research.news_interval_minutes * 60 + 1
+        svc.get("AAPL")
+        assert calls == ["AAPL", "AAPL"]
+
+    def test_sentiment_parsing(self, store, settings):
+        svc = NewsService(store, settings,
+                          fetcher=lambda s: ("bad quarter. SENTIMENT: bearish", 0.0))
+        assert svc.get("AAPL")["sentiment"] == "bearish"
+
+    def test_no_fetcher_degrades_gracefully(self, store, settings):
+        svc = NewsService(store, settings, fetcher=None)
+        assert svc.get("AAPL") is None               # no key, no crash
+
+    def test_fetch_cost_recorded(self, store, settings):
+        svc = NewsService(store, settings,
+                          fetcher=lambda s: ("x. SENTIMENT: neutral", 0.005))
+        svc.get("AAPL")
+        assert store.total_costs().get("inference", 0) == pytest.approx(0.005)
+
+
+class TestDailyAnalyst:
+    def test_applies_bounded_adjustments(self, store, settings):
+        response = json.dumps({
+            "risk": {"stop_loss_pct": 0.04, "take_profit_pct": 0.10,
+                     "min_confidence": 0.6},
+            "notes": "tighten stops, demand higher conviction",
+        })
+        analyst = DailyAnalyst(store, settings, caller=lambda prompt: (response, 0.01))
+        result = analyst.run()
+        assert result is not None
+        assert settings.risk.stop_loss_pct == pytest.approx(0.04)
+        assert settings.risk.min_confidence == pytest.approx(0.6)
+        # Insight is persisted for the dashboard.
+        kinds = [a["kind"] for a in store.recent_activity(10)]
+        assert "insight" in kinds
+
+    def test_out_of_bounds_values_are_clamped(self, store, settings):
+        response = json.dumps({"risk": {"stop_loss_pct": 0.9, "min_confidence": 0.01}})
+        analyst = DailyAnalyst(store, settings, caller=lambda p: (response, 0.0))
+        analyst.run()
+        # Clamped into the sane envelope, not applied raw.
+        assert settings.risk.stop_loss_pct <= 0.15
+        assert settings.risk.min_confidence >= 0.4
+
+    def test_malformed_response_is_a_noop(self, store, settings):
+        before = settings.risk.stop_loss_pct
+        analyst = DailyAnalyst(store, settings, caller=lambda p: ("not json at all", 0.0))
+        assert analyst.run() is None
+        assert settings.risk.stop_loss_pct == before
+
+    def test_no_caller_and_no_key_degrades(self, store, settings):
+        analyst = DailyAnalyst(store, settings, caller=None)
+        assert analyst.run() is None

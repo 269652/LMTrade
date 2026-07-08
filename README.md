@@ -22,11 +22,15 @@ enforced rule.
 
 | Layer | Module | What it does |
 |-------|--------|--------------|
-| **CLI** | `lmtrade.cli` | `run`, `web`, `viz`, `status`, `deploy`, `reset`, `config` |
-| **Web dashboard** | `lmtrade.web` | Portfolio, economics, trades, activity feed, logs, equity curve |
+| **CLI** | `lmtrade.cli` | `run`, `web`, `viz`, `status`, `analyze`, `deploy`, `reset`, `config` |
+| **Web dashboard** | `lmtrade.web` | Portfolio, economics, trades, options, leaderboard, benchmark, news, logs |
 | **Inline viz** | `lmtrade.viz` | Notebook-native matplotlib dashboard (Colab/Jupyter) + `lmtrade viz` PNG |
-| **Engine** | `core.engine` | Evaluation loop: data → economics gate → risk → fusion → execution |
-| **Fusion** | `agents.fusion` | Weighted vote across all model providers → one `Decision` |
+| **Engine** | `core.engine` | High-cadence loop: research jobs → data → economics gate → fusion+strategy → options/equity execution |
+| **Options** | `finance.options` | Black-Scholes pricing/greeks, synthetic near-ATM chain, mark-to-market |
+| **Learning** | `strategies.*` | Momentum/mean-reversion/breakout genomes; evolutionary optimizer driven by realized paper P&L |
+| **Research** | `research.*` | Hourly Perplexity news (cached) + daily Claude strategy review with clamped parameter updates |
+| **Benchmark** | `core.engine` | Live alpha vs buy-and-hold SPY — the "retail baseline" |
+| **Fusion** | `agents.fusion` | Weighted vote: financial models + SLM + LLM + news sentiment + learned strategy |
 | **Models** | `models.providers` | Heuristic (financial), local SLM (Ollama), cloud LLM, Perplexity research |
 | **Finance** | `finance.*` | SMA/EMA/RSI/MACD indicators, position sizing, stop-loss/take-profit |
 | **Brokers** | `brokers.*` | `PaperBroker` (default) + guarded Trade Republic adapter |
@@ -123,15 +127,49 @@ pytest
 The suite runs the whole stack end-to-end in paper mode with **no network and no
 API keys**.
 
+## The learning loop
+
+The bot maintains a population of strategy **genomes** (momentum, mean-reversion,
+breakout — each with mutable parameters). Every cycle the epsilon-greedy
+optimizer picks a genome whose signal is fused with the model votes; every
+closed trade's realized P&L is attributed back to its genome; every N closed
+trades the worst performer is replaced by a **mutated copy of the best**. With
+persistent state this runs for months of paper training, and `lmtrade status` /
+the dashboard show the live leaderboard. A **daily Claude review** additionally
+adjusts risk parameters inside hard safety clamps, and **hourly Perplexity news**
+feeds sentiment into every decision.
+
+Outperformance is *measured*, not promised: the benchmark tracker holds SPY from
+the same starting budget (the retail baseline) and the dashboard shows live
+**alpha** against it.
+
+## GPU sizing (T4 / A100)
+
+| GPU | SLM (`LMTRADE_SLM_MODEL`) | Typical Vast.ai rate | `LMTRADE_GPU_USD_PER_HOUR` |
+|-----|---------------------------|----------------------|-----------------------------|
+| Tesla T4 (16 GB) | `qwen2.5:1.5b` | ~$0.10–0.25/hr | `0.20` |
+| A100 (40/80 GB) | `qwen2.5:7b` (or `14b`) | ~$0.60–1.10/hr | `0.80` |
+
+The runway guardrail scales with the rate you configure — a bigger GPU demands
+proportionally more P&L before the bot counts as self-sustaining.
+
 ## Honest limitations
 
-- **Trade Republic has no official API.** Live trading uses an unofficial client
-  and is against TR's ToS — read [`docs/TRADE_REPUBLIC.md`](docs/TRADE_REPUBLIC.md).
-- **€10 is tiny.** A flat ~€1 order fee is a 10% round-trip drag; the paper broker
-  models it so P&L is honest. Covering a GPU bill on top is genuinely hard — the
-  economics layer is built to be honest about that, not to pretend otherwise.
-- This is a **framework and research tool**, not financial advice. Trading risks
-  real loss. Use paper mode until you understand exactly what it does.
+- **True HFT is impossible on Trade Republic.** No official API exists; the
+  unofficial mobile API has seconds-to-minutes latency and no options chains.
+  LMTrade is a *high-cadence intraday* bot (seconds-scale cycles), and its
+  options layer is synthetic Black-Scholes pricing for paper trading — read
+  [`docs/TRADE_REPUBLIC.md`](docs/TRADE_REPUBLIC.md) before even thinking about
+  live mode.
+- **€10 is tiny.** A flat ~€1 equity order fee is a 10% round-trip drag; the
+  paper broker models it so P&L is honest. Covering a GPU bill on top is
+  genuinely hard — the economics layer is built to be honest about that, not to
+  pretend otherwise.
+- **No performance guarantees.** "Outperform retail" and "self-sustaining in
+  3–6 months" are goals the benchmark and economics layers *measure*; nothing
+  here promises returns. This is a framework and research tool, not financial
+  advice. Trading risks real loss. Use paper mode until you understand exactly
+  what it does.
 
 ## License
 

@@ -12,31 +12,54 @@ universe:                  # instruments to trade
   - SPY
 
 loop:
-  interval_seconds: 60     # how often the engine evaluates the universe
+  interval_seconds: 15     # high-cadence intraday loop (TR can't do true HFT;
+                           # sub-second execution is impossible via its API)
   max_positions: 2         # cap concurrent open positions (tiny budget!)
 
 model:
   stack: [heuristic, slm, perplexity]   # providers consulted, in order
-  slm_model: "qwen2.5:1.5b"
+  slm_model: "qwen2.5:1.5b"             # T4-sized; use qwen2.5:7b on an A100
   cloud_model: "claude-haiku-4-5-20251001"
   perplexity_model: "sonar"
-  # Weight each provider's vote in the fusion decision
   weights:
     heuristic: 1.0
     slm: 1.0
     cloud: 1.5
     perplexity: 1.2
+    strategy: 1.5          # the learned strategy genome's vote
+    news: 1.0              # hourly news sentiment vote
 
 risk:
-  max_position_fraction: 0.5   # no single position > 50% of equity
-  stop_loss_pct: 0.05          # 5% hard stop
-  take_profit_pct: 0.08        # 8% target
-  min_confidence: 0.55         # skip trades below this fused confidence
+  max_position_fraction: 0.5
+  stop_loss_pct: 0.05
+  take_profit_pct: 0.08
+  min_confidence: 0.55
+
+options:                   # synthetic Black-Scholes options layer (paper)
+  enabled: true
+  expiry_days: 7
+  max_option_fraction: 0.3   # max fraction of equity in one premium
+  take_profit_pct: 0.5       # +50% premium -> take profit
+  stop_loss_pct: 0.4         # -40% premium -> cut
+  min_hours_to_expiry: 24    # force-close inside this window
+
+learning:                  # evolutionary strategy optimizer
+  enabled: true
+  population: 8
+  epsilon: 0.2               # exploration rate
+  mutation_scale: 0.3
+  evolve_every_trades: 10
+
+research:
+  news_interval_minutes: 60          # hourly Perplexity news
+  daily_analysis_interval_hours: 24  # daily Claude strategy review
+
+benchmark:
+  symbol: SPY              # "retail baseline": buy-and-hold SPY
 
 economics:
-  gpu_usd_per_hour: 0.20       # Vast.ai hourly burn
-  min_runway_hours: 6          # halt if projected runway < this
-  # Assumed marginal inference costs (USD) used for pre-trade budgeting
+  gpu_usd_per_hour: 0.20       # Vast.ai hourly burn (T4 ~0.15-0.25, A100 ~0.6-1.1)
+  min_runway_hours: 6
   inference_cost:
     slm: 0.0002
     cloud: 0.004
@@ -48,3 +71,4 @@ web:
 
 data:
   provider: auto             # auto | yfinance | synthetic
+  intraday: true             # 1m bars when yfinance is available

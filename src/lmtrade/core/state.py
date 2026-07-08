@@ -65,6 +65,33 @@ CREATE TABLE IF NOT EXISTS costs (
     provider TEXT,
     amount   REAL NOT NULL            -- USD
 );
+CREATE TABLE IF NOT EXISTS option_positions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    underlying    TEXT NOT NULL,
+    kind          TEXT NOT NULL,      -- call | put
+    strike        REAL NOT NULL,
+    expiry_ts     REAL NOT NULL,
+    iv            REAL NOT NULL,
+    contracts     REAL NOT NULL,
+    entry_premium REAL NOT NULL,
+    opened_ts     REAL NOT NULL,
+    genome_id     TEXT,               -- learning attribution
+    status        TEXT NOT NULL DEFAULT 'open',   -- open | closed
+    exit_premium  REAL,
+    closed_ts     REAL,
+    pnl           REAL
+);
+CREATE TABLE IF NOT EXISTS news (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        REAL NOT NULL,
+    symbol    TEXT NOT NULL,
+    text      TEXT NOT NULL,
+    sentiment TEXT                    -- bullish | bearish | neutral
+);
+CREATE TABLE IF NOT EXISTS benchmark_curve (
+    ts     REAL PRIMARY KEY,
+    equity REAL NOT NULL             -- buy-and-hold benchmark equity
+);
 """
 
 
@@ -237,6 +264,86 @@ class Store:
                 "SELECT kind, SUM(amount) AS total FROM costs GROUP BY kind"
             ).fetchall()
         return {r["kind"]: r["total"] for r in rows}
+
+    # -- option positions -------------------------------------------------------
+    def open_option(
+        self, underlying: str, kind: str, strike: float, expiry_ts: float,
+        iv: float, contracts: float, entry_premium: float, genome_id: str | None,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO option_positions(underlying,kind,strike,expiry_ts,iv,"
+                "contracts,entry_premium,opened_ts,genome_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                (underlying, kind, strike, expiry_ts, iv, contracts, entry_premium,
+                 time.time(), genome_id),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def close_option(self, opt_id: int, exit_premium: float, pnl: float) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE option_positions SET status='closed', exit_premium=?, "
+                "closed_ts=?, pnl=? WHERE id=?",
+                (exit_premium, time.time(), pnl, opt_id),
+            )
+            self._conn.commit()
+
+    def open_options(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM option_positions WHERE status='open'"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def closed_options(self, limit: int = 200) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM option_positions WHERE status='closed' "
+                "ORDER BY closed_ts DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- news cache -------------------------------------------------------------
+    def add_news(
+        self, symbol: str, text: str, sentiment: str | None, ts: float | None = None
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO news(ts,symbol,text,sentiment) VALUES(?,?,?,?)",
+                (ts if ts is not None else time.time(), symbol, text, sentiment),
+            )
+            self._conn.commit()
+
+    def latest_news(self, symbol: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM news WHERE symbol=? ORDER BY ts DESC LIMIT 1", (symbol,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def recent_news(self, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM news ORDER BY ts DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- benchmark ---------------------------------------------------------------
+    def record_benchmark(self, equity: float) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO benchmark_curve(ts,equity) VALUES(?,?) "
+                "ON CONFLICT(ts) DO NOTHING", (time.time(), equity),
+            )
+            self._conn.commit()
+
+    def benchmark_curve(self, limit: int = 500) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM benchmark_curve ORDER BY ts DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in reversed(rows)]
 
     def close(self) -> None:
         with self._lock:

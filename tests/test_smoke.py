@@ -24,6 +24,7 @@ def settings(tmp_path: Path) -> Settings:
                  data={"provider": "synthetic"})
     s.model.stack = ["heuristic"]
     s.data_dir = tmp_path
+    s.loop.interval_seconds = 1   # keep multi-cycle tests fast
     return s
 
 
@@ -117,3 +118,7 @@ def test_viz_renders_headless(settings: Settings, monkeypatch):
     fig = viz.dashboard_figure(db_path=settings.db_path)
     assert fig is not None
     assert len(fig.axes) >= 4
+    # Equity axis must overlay the retail benchmark when benchmark data exists.
+    eq_ax = fig.axes[0]
+    labels = [ln.get_label() for ln in eq_ax.lines]
+    assert any("benchmark" in str(l).lower() for l in labels), labels
