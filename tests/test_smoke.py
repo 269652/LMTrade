@@ -28,6 +28,11 @@ def settings(tmp_path: Path) -> Settings:
     return s
 
 
+def test_default_budget_is_100():
+    """Fees (~1 EUR/equity order) bite too hard at 10 EUR — default is 100."""
+    assert Settings().budget == 100.0
+
+
 def test_indicators_need_history():
     assert indicators.sma([1, 2], 5) is None
     assert indicators.rsi(list(range(1, 40))) is not None

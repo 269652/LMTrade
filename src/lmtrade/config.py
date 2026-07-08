@@ -96,7 +96,7 @@ class DataConfig(BaseModel):
 
 class Settings(BaseModel):
     mode: str = "paper"
-    budget: float = 10.0
+    budget: float = 100.0
     currency: str = "EUR"
     universe: list[str] = ["AAPL", "MSFT", "SPY"]
     loop: LoopConfig = LoopConfig()

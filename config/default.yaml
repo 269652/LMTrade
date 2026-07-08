@@ -3,7 +3,8 @@
 # See .env.example for the full list.
 
 mode: paper                # paper | live
-budget: 10.0               # starting cash, account currency
+budget: 100.0              # starting cash, account currency (paper default;
+                           # ~1 EUR flat fees are a 10% drag at 10 EUR scale)
 currency: EUR
 
 universe:                  # instruments to trade

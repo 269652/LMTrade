@@ -22,7 +22,8 @@ enforced rule.
 
 | Layer | Module | What it does |
 |-------|--------|--------------|
-| **CLI** | `lmtrade.cli` | `run`, `web`, `viz`, `status`, `analyze`, `deploy`, `reset`, `config` |
+| **CLI** | `lmtrade.cli` | `run`, `backtest`, `web`, `viz`, `status`, `analyze`, `deploy`, `reset`, `config` |
+| **Backtest** | `backtest.walk_forward` | Walk-forward folds over historical bars; pre-trains the genome population |
 | **Web dashboard** | `lmtrade.web` | Portfolio, economics, trades, options, leaderboard, benchmark, news, logs |
 | **Inline viz** | `lmtrade.viz` | Notebook-native matplotlib dashboard (Colab/Jupyter) + `lmtrade viz` PNG |
 | **Engine** | `core.engine` | High-cadence loop: research jobs → data → economics gate → fusion+strategy → options/equity execution |
@@ -126,6 +127,21 @@ pytest
 
 The suite runs the whole stack end-to-end in paper mode with **no network and no
 API keys**.
+
+## Walk-forward backtesting
+
+Pre-train the strategies on history before any live paper trading:
+
+```bash
+lmtrade backtest --bars 500 --train 150 --test 50
+```
+
+Rolling **[train | test]** folds step through the data: every genome trades the
+train window (simulated with the same Black-Scholes option rules as the live
+engine, P&L feeding the evolutionary optimizer), then the fittest genome is
+scored on the *unseen* test window — the out-of-sample column is the honest
+number. The trained population persists, so `lmtrade run` starts pre-trained.
+Uses real daily bars via yfinance when available, synthetic data offline.
 
 ## The learning loop
 

@@ -179,6 +179,50 @@ def deploy(
 
 
 @app.command()
+def backtest(
+    bars: int = typer.Option(500, help="Total daily bars of history."),
+    train: int = typer.Option(150, "--train", help="Train window (bars) per fold."),
+    test: int = typer.Option(50, "--test", help="Out-of-sample test window (bars)."),
+):
+    """Walk-forward backtest: pre-train the strategy genome population on
+    historical data. The trained population persists, so `lmtrade run` starts
+    with the learned fitness."""
+    from .backtest.walk_forward import WalkForward
+
+    settings = load_settings()
+    store = Store(settings.db_path)
+    console.print(f"[cyan]Walk-forward:[/cyan] {bars} bars, "
+                  f"{train} train / {test} test per fold, "
+                  f"universe {settings.universe}")
+    wf = WalkForward(settings, store)
+    result = wf.run(settings.universe, bars=bars, train_bars=train, test_bars=test)
+
+    ft = Table(title="Walk-forward folds")
+    ft.add_column("Fold", justify="right"); ft.add_column("Best strategy")
+    ft.add_column("Train P&L", justify="right")
+    ft.add_column("Test P&L (OOS)", justify="right")
+    for f in result["folds"]:
+        color = "green" if f["test_pnl"] >= 0 else "red"
+        ft.add_row(str(f["fold"]), f["best_strategy"],
+                   f"{f['train_pnl']:+.2f}",
+                   f"[{color}]{f['test_pnl']:+.2f}[/{color}]")
+    console.print(ft)
+    total = result["total_test_pnl"]
+    console.print(f"Total out-of-sample P&L: "
+                  f"[{'green' if total >= 0 else 'red'}]{total:+.2f} "
+                  f"{settings.currency}[/]")
+
+    lt = Table(title="Trained strategy leaderboard")
+    lt.add_column("Strategy"); lt.add_column("Genome")
+    lt.add_column("Trades", justify="right"); lt.add_column("Fitness", justify="right")
+    for g in result["leaderboard"][:8]:
+        lt.add_row(g["strategy"], g["id"], str(g["trades"]), f"{g['fitness']:+.4f}")
+    console.print(lt)
+    console.print("[dim]Population saved — `lmtrade run` now starts pre-trained.[/dim]")
+    store.close()
+
+
+@app.command()
 def analyze():
     """Run the daily Claude strategy review on demand (needs ANTHROPIC_API_KEY)."""
     from .research.daily import DailyAnalyst
