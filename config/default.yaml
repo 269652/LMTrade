@@ -71,5 +71,6 @@ web:
   port: 8000
 
 data:
-  provider: auto             # auto | yfinance | synthetic
-  intraday: true             # 1m bars when yfinance is available
+  provider: auto             # auto | yahoo | synthetic (legacy "yfinance" name
+                             # still accepted — see data/market.py)
+  intraday: true             # 1m bars when the live Yahoo feed is available

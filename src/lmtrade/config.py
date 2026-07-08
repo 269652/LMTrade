@@ -91,7 +91,7 @@ class WebConfig(BaseModel):
 
 class DataConfig(BaseModel):
     provider: str = "auto"
-    intraday: bool = True     # 1m bars (yfinance) / 10s synthetic ticks
+    intraday: bool = True     # 1m bars (Yahoo, via httpx) / 10s synthetic ticks
 
 
 class Settings(BaseModel):

@@ -27,8 +27,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Live market data
-data = ["yfinance>=0.2.40"]
 # Live Trade Republic execution (unofficial API — opt-in, use at your own risk)
 traderepublic = ["pytr>=0.2.0"]
 # Local SLM inference helpers

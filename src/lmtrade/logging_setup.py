@@ -19,6 +19,13 @@ def setup_logging(level: int = logging.INFO) -> None:
         datefmt="[%X]",
         handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
     )
+    # Quiet noisy third-party HTTP client loggers (one INFO line per request —
+    # the engine fetches market data every cycle, which spams the console).
+    # Set explicitly rather than relying on root inheritance: basicConfig()
+    # is a no-op once root already has a handler (e.g. under a test runner's
+    # log-capture plugin, or if another library configured logging first).
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     _CONFIGURED = True
 
 

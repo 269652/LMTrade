@@ -46,6 +46,36 @@ class TestFetchHistory:
         b = fetch_history("MSFT", bars=100, provider="synthetic")
         assert a == b
 
+    def test_live_provider_uses_injected_fetcher(self):
+        """Real data comes from the same httpx-based Yahoo fetcher as
+        MarketData (not the yfinance package — see data/market.py for why).
+        Offline: the fetcher is injected, never touches the network."""
+        calls: list = []
+
+        def fake_fetcher(symbol, range_, interval):
+            calls.append((symbol, range_, interval))
+            return [100.0 + i for i in range(300)]
+
+        h = fetch_history("AAPL", bars=200, provider="auto", fetcher=fake_fetcher)
+        assert len(h) == 200
+        assert h == [100.0 + i for i in range(100, 300)]
+        assert calls and calls[0][0] == "AAPL"
+
+    def test_live_provider_falls_back_to_synthetic_on_fetch_failure(self):
+        def failing_fetcher(symbol, range_, interval):
+            raise RuntimeError("network unavailable")
+
+        h = fetch_history("AAPL", bars=150, provider="auto", fetcher=failing_fetcher)
+        assert len(h) == 150
+        assert all(p > 0 for p in h)
+
+    def test_live_provider_falls_back_when_too_few_bars_returned(self):
+        def short_fetcher(symbol, range_, interval):
+            return [100.0, 101.0, 102.0]   # far fewer than requested
+
+        h = fetch_history("AAPL", bars=200, provider="auto", fetcher=short_fetcher)
+        assert len(h) == 200   # synthetic fallback made up the length
+
 
 class TestSimulateGenome:
     def _genome(self):

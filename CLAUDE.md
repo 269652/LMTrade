@@ -20,9 +20,12 @@ Every change to this codebase must follow test-driven development:
    it must add or change tests in the same commit.
 
 Tests must be runnable **offline with no API keys** — external services
-(Ollama, Anthropic, Perplexity, yfinance, Vast.ai, Trade Republic) are always
-optional at runtime and must be faked/stubbed or skipped in tests. The
-synthetic market-data provider exists for exactly this purpose.
+(Ollama, Anthropic, Perplexity, Yahoo Finance, Vast.ai, Trade Republic) are
+always optional at runtime and must be faked/stubbed or skipped in tests. The
+synthetic market-data provider exists for exactly this purpose. Live market
+data goes through `httpx` directly against Yahoo's chart API — not the
+`yfinance` PyPI package, whose `curl_cffi` backend does browser TLS-fingerprint
+impersonation that breaks under some sandboxed/proxied networks.
 
 ## Project overview
 

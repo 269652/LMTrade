@@ -69,10 +69,17 @@ lmtrade status
 lmtrade web            # → http://localhost:8000
 ```
 
-Optional live data / models:
+Live market data (real prices) works out of the box — no extra install, no API
+key. `data.provider: auto` fetches closes directly from Yahoo Finance's public
+chart endpoint via `httpx` and falls back to synthetic data on any network
+hiccup. (Deliberately not the `yfinance` PyPI package: its `curl_cffi` backend
+does browser TLS-fingerprint impersonation, which breaks under some sandboxed
+/ proxied network setups — plain `httpx` against the same Yahoo endpoint does
+not have that problem.)
+
+Optional model providers:
 
 ```bash
-pip install -e '.[data]'          # yfinance market data
 cp .env.example .env              # add OLLAMA_HOST, ANTHROPIC_API_KEY, PERPLEXITY_API_KEY…
 ```
 
@@ -141,7 +148,8 @@ train window (simulated with the same Black-Scholes option rules as the live
 engine, P&L feeding the evolutionary optimizer), then the fittest genome is
 scored on the *unseen* test window — the out-of-sample column is the honest
 number. The trained population persists, so `lmtrade run` starts pre-trained.
-Uses real daily bars via yfinance when available, synthetic data offline.
+Uses real daily bars from Yahoo Finance (via httpx) when reachable, synthetic
+data offline.
 
 ## The learning loop
 

@@ -1,8 +1,13 @@
 """Market data providers.
 
-`auto` uses yfinance when available and falls back to a deterministic synthetic
-random-walk generator, so the bot always runs — offline, in CI, or on a fresh
-Vast.ai box before keys are set.
+`auto` (and the legacy `yfinance` provider name) fetch real closes directly
+from Yahoo Finance's public chart JSON endpoint via httpx. The `yfinance`
+PyPI package is deliberately NOT used: its `curl_cffi` backend impersonates a
+browser's TLS fingerprint, which this project's sandboxed proxy environments
+cannot pass through (the handshake is reset) — plain httpx against the same
+Yahoo endpoint works fine. Falls back to a deterministic synthetic
+random-walk generator on any fetch failure, so the bot always runs — offline,
+in CI, or on a fresh Vast.ai box before network/keys are set.
 """
 from __future__ import annotations
 
@@ -10,6 +15,10 @@ import hashlib
 import math
 import time
 from dataclasses import dataclass
+from typing import Callable
+
+# (symbol, range_, interval) -> list of close prices, oldest -> newest
+Fetcher = Callable[[str, str, str], list[float]]
 
 
 @dataclass
@@ -20,44 +29,60 @@ class Quote:
     source: str
 
 
+def default_yahoo_fetcher(symbol: str, range_: str, interval: str) -> list[float]:
+    """Fetch closes from Yahoo Finance's public chart API via plain httpx."""
+    import httpx
+
+    r = httpx.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+        params={"range": range_, "interval": interval},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=15.0,
+    )
+    r.raise_for_status()
+    payload = r.json()
+    result = payload.get("chart", {}).get("result") or []
+    if not result:
+        raise ValueError(f"no chart data for {symbol}")
+    closes = result[0]["indicators"]["quote"][0]["close"]
+    return [float(c) for c in closes if c is not None]
+
+
 class MarketData:
-    def __init__(self, provider: str = "auto", lookback: int = 60, intraday: bool = False):
+    def __init__(
+        self, provider: str = "auto", lookback: int = 60, intraday: bool = False,
+        fetcher: Fetcher | None = None,
+    ):
         self.lookback = lookback
         self.intraday = intraday
         self.provider = self._resolve(provider)
+        self.fetcher = fetcher or default_yahoo_fetcher
 
     def _resolve(self, provider: str) -> str:
         if provider == "synthetic":
             return "synthetic"
-        try:
-            import yfinance  # noqa: F401
-
-            return "yfinance"
-        except Exception:
-            return "synthetic"
+        return "yahoo"   # "auto" and the legacy "yfinance" name both mean live data
 
     def quote(self, symbol: str) -> Quote:
-        if self.provider == "yfinance":
+        if self.provider == "yahoo":
             try:
-                return self._yf_quote(symbol)
+                return self._yahoo_quote(symbol)
             except Exception:
                 pass  # fall through to synthetic on any data hiccup
         return self._synthetic_quote(symbol)
 
-    # -- yfinance -------------------------------------------------------------
-    def _yf_quote(self, symbol: str) -> Quote:
-        import yfinance as yf
-
+    # -- live data (Yahoo, via httpx) ------------------------------------------
+    def _yahoo_quote(self, symbol: str) -> Quote:
         if self.intraday:
-            hist = yf.Ticker(symbol).history(period="1d", interval="1m")
-            if hist.empty:  # market closed / no intraday bars -> daily fallback
-                hist = yf.Ticker(symbol).history(period="3mo", interval="1d")
+            closes = self.fetcher(symbol, "1d", "1m")
+            if len(closes) < 2:   # market closed / no intraday bars -> daily fallback
+                closes = self.fetcher(symbol, "3mo", "1d")
         else:
-            hist = yf.Ticker(symbol).history(period="3mo", interval="1d")
-        closes = [float(x) for x in hist["Close"].dropna().tolist()][-self.lookback:]
+            closes = self.fetcher(symbol, "3mo", "1d")
+        closes = closes[-self.lookback:]
         if not closes:
             raise ValueError("no data")
-        return Quote(symbol, closes[-1], closes, "yfinance")
+        return Quote(symbol, closes[-1], closes, "yahoo")
 
     # -- synthetic ------------------------------------------------------------
     def _synthetic_quote(self, symbol: str) -> Quote:

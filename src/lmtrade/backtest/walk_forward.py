@@ -19,7 +19,7 @@ import random
 
 from ..config import Settings
 from ..core.state import Store
-from ..data.market import MarketData
+from ..data.market import Fetcher, MarketData, default_yahoo_fetcher
 from ..finance.options import bs_price, realized_iv
 from ..strategies.optimizer import Genome, StrategyOptimizer
 
@@ -29,16 +29,18 @@ OPTION_FEE = 0.1
 MIN_SIGNAL_STRENGTH = 0.3
 
 
-def fetch_history(symbol: str, bars: int, provider: str = "auto") -> list[float]:
-    """Daily close history, `bars` long. yfinance when available (period sized
-    to the request), deterministic synthetic random walk otherwise."""
+def fetch_history(
+    symbol: str, bars: int, provider: str = "auto", fetcher: Fetcher | None = None,
+) -> list[float]:
+    """Daily close history, `bars` long. Real data comes from the same
+    httpx-based Yahoo fetcher MarketData uses (not the yfinance package —
+    its curl_cffi backend can't pass through a TLS-fingerprinting-blocking
+    proxy); falls back to a deterministic synthetic random walk otherwise."""
     if provider != "synthetic":
         try:
-            import yfinance as yf
-
+            fetch = fetcher or default_yahoo_fetcher
             years = max(1, int(bars / 252) + 1)
-            hist = yf.Ticker(symbol).history(period=f"{years}y", interval="1d")
-            closes = [float(x) for x in hist["Close"].dropna().tolist()]
+            closes = fetch(symbol, f"{years}y", "1d")
             if len(closes) >= bars:
                 return closes[-bars:]
         except Exception:  # noqa: BLE001 — fall back to synthetic
