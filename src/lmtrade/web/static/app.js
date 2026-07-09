@@ -54,7 +54,6 @@ function paintSummary(s) {
   $("cash").textContent = fmt(s.cash) + " " + cur;
   $("reserve").textContent = fmt(s.reserve != null ? s.reserve : (econ.reserve_eur || 0)) + " " + cur;
   $("npos").textContent = s.num_positions;
-  $("runway").textContent = econ.runway_hours != null ? fmt(econ.runway_hours, 1) + "h" : "—";
   const compute = (econ.gpu_cost_accrued_usd || 0) + (econ.inference_cost_usd || 0);
   $("compute").textContent = "$" + fmt(compute, 4);
 
