@@ -12,6 +12,7 @@ restarts and is visible to the dashboard.
 """
 from __future__ import annotations
 
+import math
 import random
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -65,11 +66,13 @@ class StrategyOptimizer:
     def __init__(
         self, store: Store, population: int = 8, epsilon: float = 0.2,
         mutation_scale: float = 0.3, rng: random.Random | None = None,
+        ucb_c: float = 2.0,
     ):
         self.store = store
         self.population = population
         self.epsilon = epsilon
         self.mutation_scale = mutation_scale
+        self.ucb_c = ucb_c
         self.rng = rng or random.Random()
         if store.get_meta(GENOMES_KEY) is None:
             self._save(self._seed_population())
@@ -107,11 +110,25 @@ class StrategyOptimizer:
 
     # -- learning API -------------------------------------------------------------
     def select(self) -> Genome:
-        """Epsilon-greedy: usually the highest-fitness genome, sometimes explore."""
+        """UCB1 selection (Auer, Cesa-Bianchi & Fischer 2002), with a small
+        epsilon of pure random exploration retained on top.
+
+        Epsilon-greedy alone had a winner-takes-all pathology observed live:
+        the first genome to beat the 0.01 optimistic prior won every exploit
+        pick, and 20% exploration split across the rest (further filtered by
+        confidence gates and slot limits) never completed a trade for them —
+        one genome had all the trades, seven had zero. UCB1's exploration
+        bonus c*sqrt(ln N / n) guarantees untried genomes are sampled first
+        and under-sampled ones are revisited at a logarithmic rate."""
         genomes = self.genomes()
         if self.rng.random() < self.epsilon:
             return self.rng.choice(genomes)
-        return max(genomes, key=lambda g: g.fitness)
+        untried = [g for g in genomes if g.trades == 0]
+        if untried:
+            return self.rng.choice(untried)
+        total = sum(g.trades for g in genomes)
+        return max(genomes, key=lambda g: g.fitness
+                   + self.ucb_c * math.sqrt(math.log(max(2, total)) / g.trades))
 
     def record_result(self, genome_id: str, pnl: float) -> None:
         genomes = self.genomes()
@@ -130,15 +147,26 @@ class StrategyOptimizer:
 
     def evolve(self, min_trades: int = 3) -> Genome | None:
         """Replace the worst proven genome with a mutated copy of the best.
-        Returns the new genome, or None if not enough evidence yet."""
+        Returns the new genome, or None if not enough evidence yet.
+
+        Species protection (simplified niching): the mutant inherits the best
+        genome's strategy, so unchecked evolution collapses the population to
+        clones of one family and the learner can never rediscover a regime
+        where another family works. A family's LAST member is never replaced —
+        the worst genome whose family still has siblings goes instead."""
         genomes = self.genomes()
         proven = [g for g in genomes if g.trades >= min_trades]
         if len(proven) < 2:
             return None
         best = max(proven, key=lambda g: g.fitness)
-        worst = min(proven, key=lambda g: g.fitness)
-        if best.id == worst.id:
+        family_counts: dict[str, int] = {}
+        for g in genomes:
+            family_counts[g.strategy] = family_counts.get(g.strategy, 0) + 1
+        replaceable = [g for g in proven
+                       if g.id != best.id and family_counts[g.strategy] >= 2]
+        if not replaceable:
             return None
+        worst = min(replaceable, key=lambda g: g.fitness)
         mutant = Genome(
             id=uuid.uuid4().hex[:8],
             strategy=best.strategy,

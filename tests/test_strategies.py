@@ -87,12 +87,16 @@ class TestOptimizer:
             assert g.strategy in STRATEGIES
             assert g.trades == 0 and g.pnl == 0.0
 
-    def test_select_returns_genome_and_is_greedy_on_best(self, store):
+    def test_select_exploits_best_once_all_are_tried(self, store):
+        # Contract updated for UCB1 selection: untried genomes are sampled
+        # first (that's the point — epsilon-greedy starved them), so every
+        # genome gets one trade before the proven best is expected to win.
         opt = self._opt(store, epsilon=0.0)
         genomes = opt.genomes()
-        # Give one genome a strong track record.
+        # Equal sample counts -> equal exploration bonus -> fitness decides.
         for _ in range(5):
-            opt.record_result(genomes[2].id, pnl=1.0)
+            for g in genomes:
+                opt.record_result(g.id, pnl=1.0 if g.id == genomes[2].id else 0.0)
         best = opt.select()
         assert best.id == genomes[2].id
 
