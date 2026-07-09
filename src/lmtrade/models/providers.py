@@ -248,7 +248,7 @@ class ClaudeCLIProvider(ModelProvider):
             f"and its sentiment. End with SENTIMENT: bullish|bearish|neutral."
         )
         try:
-            return self._runner(prompt, self.timeout), 0.0
+            text = self._runner(prompt, self.timeout)
         except Exception as exc:  # noqa: BLE001
             # Return empty (not error text) so a failed CLI call is *skipped*
             # by NewsService rather than stored as a bogus "neutral" news item
@@ -256,6 +256,15 @@ class ClaudeCLIProvider(ModelProvider):
             # loudly so the failure is diagnosable instead of silent.
             log.warning("claude CLI research failed for %s: %s", symbol, exc)
             return "", 0.0
+        # A valid response MUST contain the SENTIMENT marker the prompt demands.
+        # Anything without it isn't research — it's CLI/shell noise (e.g. a
+        # Windows "Terminate batch job (Y/N)?" prompt captured when the process
+        # was interrupted). Skip it rather than store it as neutral news.
+        if "sentiment" not in (text or "").lower():
+            log.warning("claude CLI research for %s returned no SENTIMENT marker "
+                        "(likely interrupted/error output) — skipping.", symbol)
+            return "", 0.0
+        return text, 0.0
 
 
 class PerplexityProvider(ModelProvider):

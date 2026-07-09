@@ -162,6 +162,27 @@ class TestClaudeCLIProvider:
         assert text == ""
         assert cost == 0.0
 
+    def test_research_without_sentiment_marker_is_skipped(self, monkeypatch):
+        # CLI/shell noise (e.g. an interrupted Windows batch prompt) has no
+        # SENTIMENT marker and must not be stored as neutral news.
+        monkeypatch.setattr(
+            "lmtrade.models.providers.shutil.which", lambda name: "/usr/bin/claude"
+        )
+        provider = ClaudeCLIProvider(
+            runner=lambda p, t: "Execution errorBatchvorgang abbrechen (J/N)?")
+        text, cost = provider.research("AAPL")
+        assert text == ""
+        assert cost == 0.0
+
+    def test_research_with_sentiment_marker_is_kept(self, monkeypatch):
+        monkeypatch.setattr(
+            "lmtrade.models.providers.shutil.which", lambda name: "/usr/bin/claude"
+        )
+        provider = ClaudeCLIProvider(
+            runner=lambda p, t: "AAPL steady into earnings. SENTIMENT: neutral")
+        text, cost = provider.research("AAPL")
+        assert "SENTIMENT" in text
+
     def test_research_failure_returns_empty_not_error_text(self, monkeypatch):
         # A crashing CLI must NOT hand back error text — NewsService would
         # store it as a news item and _parse_sentiment would call it
@@ -207,8 +228,11 @@ class TestClaudeCLITimeout:
         )
         seen = {}
         settings = Settings(research={"claude_cli_timeout_seconds": 200})
-        provider = ClaudeCLIProvider(
-            settings, runner=lambda p, t: seen.setdefault("timeout", t) or "SENTIMENT: neutral"
-        )
+
+        def runner(prompt, timeout):
+            seen["timeout"] = timeout
+            return "SENTIMENT: neutral"
+
+        provider = ClaudeCLIProvider(settings, runner=runner)
         provider.research("AAPL")
         assert seen["timeout"] == 200

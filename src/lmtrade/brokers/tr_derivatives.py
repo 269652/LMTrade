@@ -23,6 +23,7 @@ Honest operational caveats, written down so nobody is surprised later:
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -147,12 +148,25 @@ class PytrDerivatives(TRDerivativesBase):
     """
 
     def __init__(self, phone: str, pin: str,
-                 api_factory: Callable[[], Any] | None = None):
+                 api_factory: Callable[[], Any] | None = None,
+                 now: Callable[[], float] = time.time,
+                 retry_backoff_s: float = 60.0):
         self._phone = phone
         self._pin = pin
         self._api_factory = api_factory
         self._api = None
-        self._failed = False
+        self._now = now
+        self._retry_backoff_s = retry_backoff_s
+        self._next_retry = 0.0   # earliest time to re-attempt a failed login
+
+    def _invalidate(self) -> None:
+        """Drop the session and schedule a re-login after a backoff. Used both
+        when a login fails and when a live call hits a stale-session error
+        (e.g. HTTP 401 on the websocket) — the session is NOT abandoned
+        permanently, so once `pytr login` refreshes the cookie the next
+        attempt re-resumes and the bot recovers without a restart."""
+        self._api = None
+        self._next_retry = self._now() + self._retry_backoff_s
 
     def _make_api(self) -> Any:
         if self._api_factory is not None:
@@ -166,34 +180,34 @@ class PytrDerivatives(TRDerivativesBase):
             phone_no=self._phone, pin=self._pin, save_cookies=True)
 
     def _login(self):
-        if self._api is not None or self._failed:
+        if self._api is not None:
             return self._api
+        if self._now() < self._next_retry:
+            return None   # in backoff after a recent failure — don't hammer TR
         try:
             api = self._make_api()
             # pytr>=0.4 dropped the old `.login()` method. The correct
             # non-interactive flow (mirroring pytr's own `account.login()`
             # reference implementation) is: try to resume the session cookie
             # saved by a prior interactive `pytr login`. If that fails there
-            # is no cached session to resume, and the fresh-pairing flow
-            # (initiate_weblogin -> wait for a 2FA code -> complete_weblogin)
-            # needs interactive input we must never block on here — so we
-            # degrade instead, same as any other unavailable-provider case.
+            # is no cached session to resume, and the fresh-pairing flow needs
+            # interactive 2FA we must never block on here — so we back off and
+            # retry, picking up a refreshed cookie automatically once the user
+            # re-runs `pytr login`.
             if not api.resume_websession():
                 log.warning(
-                    "TR session not resumable — no cached session cookie found "
-                    "(or it expired). Run `pytr login -n \"<TR_PHONE>\" -p "
-                    "\"<TR_PIN>\" --store_credentials` once interactively (the "
-                    "--store_credentials flag is required, or nothing persists "
-                    "to disk; the phone number must match TR_PHONE "
-                    "character-for-character), then restart LMTrade. Falling "
-                    "back to synthetic instruments for now.")
-                self._failed = True
+                    "TR session not resumable (expired or no cookie). Re-run "
+                    "`pytr login -n \"<TR_PHONE>\" -p \"<TR_PIN>\" "
+                    "--store_credentials`; the bot will pick up the refreshed "
+                    "session on its next attempt. Using synthetic instruments "
+                    "meanwhile.")
+                self._invalidate()
                 return None
             self._api = api
         except Exception as exc:  # noqa: BLE001
-            log.warning("TR derivatives unavailable (%s) — falling back to "
-                        "synthetic instruments.", exc)
-            self._failed = True
+            log.warning("TR derivatives unavailable (%s) — retrying later, "
+                        "synthetic instruments meanwhile.", exc)
+            self._invalidate()
         return self._api
 
     def available(self) -> bool:
@@ -283,7 +297,12 @@ class PytrDerivatives(TRDerivativesBase):
                 log.debug("TR knockout search for %s: no instruments returned.", underlying)
             return out
         except Exception as exc:  # noqa: BLE001
-            log.warning("TR derivative search failed (%s).", exc)
+            # A stale-session error (e.g. HTTP 401 on the websocket) surfaces
+            # here — drop the session so the next call re-resumes with a
+            # (possibly refreshed) cookie instead of failing forever.
+            log.warning("TR derivative search failed (%s) — dropping session, "
+                        "will re-login.", exc)
+            self._invalidate()
             return []
 
     def account_cash(self) -> float | None:

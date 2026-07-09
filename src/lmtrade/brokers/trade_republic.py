@@ -45,7 +45,15 @@ class TradeRepublicBroker(Broker):
                 "Refusing to start live trading without credentials."
             )
         self._api = None
-        self._failed = False
+        self._next_retry = 0.0
+
+    def _invalidate(self) -> None:
+        """Drop the session and back off, so a refreshed cookie (after the
+        user re-runs `pytr login`) is picked up on a later attempt instead of
+        disabling live execution permanently."""
+        import time
+        self._api = None
+        self._next_retry = time.time() + 60.0
 
     # -- session -------------------------------------------------------------
     def _make_api(self) -> Any:
@@ -59,19 +67,23 @@ class TradeRepublicBroker(Broker):
             phone_no=self.phone, pin=self.pin, save_cookies=True)
 
     def _login(self):
-        if self._api is not None or self._failed:
+        import time
+        if self._api is not None:
             return self._api
+        if time.time() < self._next_retry:
+            return None   # backoff after a recent failure
         try:
             api = self._make_api()
             if not api.resume_websession():
-                log.warning("TR live session not resumable — run `pytr login "
-                            "--store_credentials` once. Live execution disabled.")
-                self._failed = True
+                log.warning("TR live session not resumable — re-run `pytr login "
+                            "--store_credentials`; the bot will pick it up on "
+                            "its next attempt.")
+                self._invalidate()
                 return None
             self._api = api
         except Exception as exc:  # noqa: BLE001
-            log.warning("TR live session unavailable (%s).", exc)
-            self._failed = True
+            log.warning("TR live session unavailable (%s) — will retry.", exc)
+            self._invalidate()
         return self._api
 
     # -- balances ------------------------------------------------------------
@@ -91,7 +103,8 @@ class TradeRepublicBroker(Broker):
 
             return _parse_cash(asyncio.get_event_loop().run_until_complete(_q())) or 0.0
         except Exception as exc:  # noqa: BLE001
-            log.warning("TR cash fetch failed (%s).", exc)
+            log.warning("TR cash fetch failed (%s) — dropping session.", exc)
+            self._invalidate()
             return 0.0
 
     def price(self, symbol: str) -> float:

@@ -296,6 +296,50 @@ class TestPytrAccountCash:
         assert FakeTRDerivatives(catalog={}).account_cash() is None
 
 
+class TestSessionRecovery:
+    """A lost session (e.g. HTTP 401 on the websocket) must NOT disable TR
+    permanently — after a backoff the client re-resumes, so once the user
+    re-runs `pytr login` and the cookie refreshes, the bot recovers without a
+    restart."""
+
+    def test_failed_login_retries_after_backoff(self):
+        clock = [1000.0]
+        states = iter([False, True])   # first resume fails, second succeeds
+
+        class FlakyApi(FakeAsyncTRApi):
+            def resume_websession(self):
+                return next(states)
+
+        made = []
+
+        def factory():
+            made.append(1)
+            return FlakyApi()
+
+        client = PytrDerivatives("+49", "1", api_factory=factory,
+                                 now=lambda: clock[0], retry_backoff_s=60.0)
+        assert client.available() is False        # first attempt fails
+        assert client.available() is False        # still in backoff, no new attempt
+        assert len(made) == 1
+        clock[0] += 61                            # backoff elapsed
+        assert client.available() is True         # re-resumes successfully
+        assert len(made) == 2
+
+    def test_search_error_drops_session_for_reresume(self):
+        clock = [1000.0]
+
+        class Boom(FakeAsyncTRApi):
+            async def recv(self):
+                raise RuntimeError("server rejected WebSocket connection: HTTP 401")
+
+        client = PytrDerivatives("+49", "1", api_factory=lambda: Boom(),
+                                 now=lambda: clock[0], retry_backoff_s=60.0)
+        assert client.search("AAPL", "buy") == []
+        # Session invalidated + in backoff now.
+        assert client._api is None
+        assert client._next_retry > clock[0]
+
+
 class TestPytrSearchDiagnostics:
     """When TR returns instruments but none parse (guessed field names don't
     match TR's real schema), the result is a silent fall-back to synthetic
