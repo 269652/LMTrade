@@ -120,6 +120,53 @@ class TestDashboardShell:
         assert isinstance(r.json(), list)
 
 
+class TestRealizedPnl:
+    """Closed options/knockouts carry realized P&L that had no home in the
+    UI — only unrealized (open) P&L and equity trades were shown. The
+    /api/realized endpoint surfaces closed positions plus running totals."""
+
+    @pytest.fixture()
+    def realized_client(self, tmp_path: Path) -> TestClient:
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        # A winner and a loser, closed.
+        for sym, entry, exit_, pnl in [("AAPL", 2.0, 3.0, 2.0), ("NVDA", 4.0, 1.0, -6.0)]:
+            oid = store.open_option(sym, "call", strike=100.0, expiry_ts=4e12, iv=0.2,
+                                    contracts=2.0, entry_premium=entry, genome_id=None,
+                                    tp_premium=entry * 1.5, sl_premium=entry * 0.6)
+            store.close_option(oid, exit_premium=exit_, pnl=pnl)
+        store.close()
+        return TestClient(create_app(s))
+
+    def test_realized_endpoint_lists_closed_with_totals(self, realized_client):
+        data = realized_client.get("/api/realized").json()
+        assert data["total_pnl"] == pytest.approx(-4.0)   # +2 and -6
+        assert data["wins"] == 1
+        assert data["losses"] == 1
+        assert len(data["rows"]) == 2
+        row = data["rows"][0]
+        assert "symbol" in row and "pnl" in row and "exit_premium" in row
+
+    def test_realized_empty_is_zeroed(self, client):
+        data = client.get("/api/realized").json()
+        assert data["total_pnl"] == 0
+        assert data["rows"] == []
+
+
+class TestReserveInSummary:
+    def test_summary_exposes_reserve(self, tmp_path):
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        store.add_reserve(12.5)
+        store.close()
+        data = TestClient(create_app(s)).get("/api/summary").json()
+        assert data["reserve"] == pytest.approx(12.5)
+
+
 class TestInfiniteRunwayJsonSafety:
     """gpu_usd_per_hour=0 (no GPU rented) makes runway_hours float('inf') —
     Starlette's JSONResponse (allow_nan=False) crashes on that unless it's

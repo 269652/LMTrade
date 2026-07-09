@@ -13,13 +13,14 @@ function sideClass(s) { return s === "buy" ? "buy" : s === "sell" ? "sell" : "ho
 
 async function refresh() {
   try {
-    const [s, trades, activity, logs, equity, strategies] = await Promise.all([
+    const [s, trades, activity, logs, equity, strategies, realized] = await Promise.all([
       getJSON("/api/summary"),
       getJSON("/api/trades?limit=100"),
       getJSON("/api/activity?limit=100"),
       getJSON("/api/logs?limit=200"),
       getJSON("/api/equity"),
       getJSON("/api/leaderboard"),
+      getJSON("/api/realized?limit=200"),
     ]);
     paintSummary(s);
     paintPositions(s.positions);
@@ -28,6 +29,7 @@ async function refresh() {
     paintLogs(logs);
     paintChart(equity);
     paintStrategies(strategies);
+    paintRealized(realized);
   } catch (e) {
     console.error(e);
   }
@@ -50,6 +52,7 @@ function paintSummary(s) {
   $("net").className = "v " + (pnl >= 0 ? "pos" : "neg");
 
   $("cash").textContent = fmt(s.cash) + " " + cur;
+  $("reserve").textContent = fmt(s.reserve != null ? s.reserve : (econ.reserve_eur || 0)) + " " + cur;
   $("npos").textContent = s.num_positions;
   $("runway").textContent = econ.runway_hours != null ? fmt(econ.runway_hours, 1) + "h" : "—";
   const compute = (econ.gpu_cost_accrued_usd || 0) + (econ.inference_cost_usd || 0);
@@ -92,6 +95,20 @@ function paintStrategies(rows) {
           + `<td>${g.trades}</td>${pnlCell(g.pnl)}<td>${fmt(g.fitness, 4)}</td></tr>`;
       }).join("")
     : `<tr><td colspan="5" class="muted">No strategies evolved yet — they appear once trades close and the optimizer runs.</td></tr>`;
+}
+
+function paintRealized(r) {
+  const total = (r && r.total_pnl) || 0;
+  const card = $("realized");
+  card.textContent = (total >= 0 ? "+" : "") + fmt(total);
+  card.className = "v " + (total > 0 ? "pos" : total < 0 ? "neg" : "");
+  $("realized-sub").textContent = r ? `${r.wins}W / ${r.losses}L closed` : "closed trades";
+  const rows = (r && r.rows) || [];
+  $("realized-rows").innerHTML = rows.length
+    ? rows.map(o => `<tr><td>${o.closed_ts ? time(o.closed_ts) : "—"}</td><td>${o.symbol}</td>`
+        + `<td><span class="kind">${o.kind}</span></td><td>${o.isin || "—"}</td>`
+        + `<td>${fmt(o.entry_premium)}</td><td>${fmt(o.exit_premium)}</td>${pnlCell(o.pnl)}</tr>`).join("")
+    : `<tr><td colspan="7" class="muted">No closed trades yet.</td></tr>`;
 }
 
 function paintTrades(rows) {
@@ -140,7 +157,7 @@ document.querySelectorAll(".tab").forEach(tab => {
   tab.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
     tab.classList.add("active");
-    ["positions", "strategies", "trades", "activity", "logs"].forEach(name =>
+    ["positions", "realized", "strategies", "trades", "activity", "logs"].forEach(name =>
       $("tab-" + name).classList.toggle("hidden", name !== tab.dataset.tab));
   });
 });

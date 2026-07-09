@@ -111,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "universe": store.get_meta("universe", settings.universe),
             "cash": round(cash, 4),
             "equity": round(equity, 4),
+            "reserve": round(store.reserve_balance(), 4),
             "starting_cash": store.get_meta("starting_cash", settings.budget),
             "economics": econ,
             "positions": rows,
@@ -136,6 +137,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/costs")
     def costs() -> JSONResponse:
         return SafeJSONResponse(store.total_costs())
+
+    @app.get("/api/realized")
+    def realized(limit: int = 100) -> JSONResponse:
+        """Closed options/knockouts with realized P&L, plus running totals —
+        the counterpart to the open positions' unrealized P&L."""
+        closed = store.closed_options(limit)
+        rows = []
+        total = wins = losses = 0.0
+        for o in closed:
+            pnl = float(o.get("pnl") or 0.0)
+            total += pnl
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
+            rows.append({
+                "symbol": f"{o['underlying']} {o.get('kind', '')}".strip(),
+                "kind": o.get("instrument_type") or "option",
+                "isin": o.get("isin"),
+                "contracts": round(o.get("contracts", 0.0), 6),
+                "entry_premium": round(o.get("entry_premium", 0.0), 4),
+                "exit_premium": round((o.get("exit_premium") or 0.0), 4),
+                "pnl": round(pnl, 4),
+                "closed_ts": o.get("closed_ts"),
+            })
+        return SafeJSONResponse({
+            "total_pnl": round(total, 4),
+            "wins": int(wins),
+            "losses": int(losses),
+            "rows": rows,
+        })
 
     @app.get("/api/options")
     def options() -> JSONResponse:

@@ -86,7 +86,9 @@
   <div class="grid" style="margin-top:16px;">
     <div class="card"><div class="k">Net Worth</div><div class="v" id="net">—</div><div class="sub" id="pnl">—</div></div>
     <div class="card"><div class="k">Cash</div><div class="v" id="cash">—</div><div class="sub" id="curr"></div></div>
+    <div class="card"><div class="k">Reserved</div><div class="v" id="reserve">—</div><div class="sub">stashed profit (protected)</div></div>
     <div class="card"><div class="k">Positions</div><div class="v" id="npos">—</div><div class="sub">open</div></div>
+    <div class="card"><div class="k">Realized P&amp;L</div><div class="v" id="realized">—</div><div class="sub" id="realized-sub">closed trades</div></div>
     <div class="card"><div class="k">GPU Runway</div><div class="v" id="runway">—</div><div class="sub">hours funded</div></div>
     <div class="card"><div class="k">Compute Spent</div><div class="v" id="compute">—</div><div class="sub">GPU + inference (USD)</div></div>
   </div>
@@ -98,6 +100,7 @@
 
   <div class="tabs">
     <div class="tab active" data-tab="positions">Positions</div>
+    <div class="tab" data-tab="realized">Realized</div>
     <div class="tab" data-tab="strategies">Strategies</div>
     <div class="tab" data-tab="trades">Trades</div>
     <div class="tab" data-tab="activity">Activity</div>
@@ -107,6 +110,11 @@
   <section id="tab-positions">
     <table><thead><tr><th>Symbol</th><th>Type</th><th>ISIN</th><th>Qty</th><th>Avg Price</th><th>Value</th><th>P&amp;L</th></tr></thead>
       <tbody id="positions"></tbody></table>
+  </section>
+
+  <section id="tab-realized" class="hidden">
+    <table><thead><tr><th>Closed</th><th>Symbol</th><th>Type</th><th>ISIN</th><th>Entry</th><th>Exit</th><th>Realized P&amp;L</th></tr></thead>
+      <tbody id="realized-rows"></tbody></table>
   </section>
 
   <section id="tab-strategies" class="hidden">
