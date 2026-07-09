@@ -114,10 +114,36 @@ class TradeRepublicBroker(Broker):
         return 0.0  # engine passes live prices from the data layer
 
     # -- execution -----------------------------------------------------------
+    @staticmethod
+    def _order_id(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        oid = payload.get("orderId") or payload.get("id")
+        return str(oid) if oid else None
+
+    @staticmethod
+    def _warning_types(payload: Any) -> list[str]:
+        out = []
+        for w in (payload or {}).get("warnings", []) or []:
+            if isinstance(w, dict):
+                t = w.get("type") or w.get("name")
+                if t:
+                    out.append(str(t))
+        return out
+
     def place_order(self, isin: str, side: str, size: float,
                     exchange: str = DEFAULT_EXCHANGE) -> OrderResult:
         """Place a REAL market order for `isin` (a knockout/warrant/equity ISIN).
-        Refuses unless armed. `size` is the number of certificates/shares."""
+        Refuses unless armed. `size` is the number of certificates/shares.
+
+        An order only counts as placed when TR POSITIVELY confirms it with an
+        order id. Live incident: TR answered a submission with a warnings-only
+        acknowledgment (no error, NO order created), the old no-error check
+        declared success, and the dashboard recorded fills the TR app never
+        made. Warnings (e.g. cost warnings) are acknowledged ONCE by
+        resubmitting with warningsShown — the double-arm consent covers that —
+        and anything still unconfirmed is a failure with the raw payload
+        logged for diagnosis."""
         if not self.armed:
             return OrderResult(
                 False, isin, side, size, 0.0, 1.0,
@@ -130,22 +156,47 @@ class TradeRepublicBroker(Broker):
         try:
             import asyncio
 
-            async def _q() -> Any:
+            from .tr_derivatives import _recv_for
+
+            async def _submit(warnings_shown: list[str] | None) -> Any:
                 # good-for-day market order, no fractional certificates.
                 sub_id = await api.market_order(isin, exchange, side, size,
-                                                "gfd", False)
-                _, _, payload = await api.recv()
+                                                "gfd", False,
+                                                warnings_shown=warnings_shown)
+                payload = await _recv_for(api, sub_id)
                 await api.unsubscribe(sub_id)
                 return payload
 
-            payload = asyncio.get_event_loop().run_until_complete(_q())
+            loop = asyncio.get_event_loop()
+            payload = loop.run_until_complete(_submit(None))
             errors = (payload or {}).get("errors")
             if errors:
                 log.warning("TR rejected %s %s x%s: %s", side, isin, size, errors)
                 return OrderResult(False, isin, side, size, 0.0, 1.0,
                                    f"TR rejected order: {errors}")
-            log.info("LIVE order placed: %s %s x%s on %s", side, isin, size, exchange)
-            return OrderResult(True, isin, side, size, 0.0, 1.0, "live order placed")
+            oid = self._order_id(payload)
+            warnings = self._warning_types(payload)
+            if oid is None and warnings:
+                log.info("TR order needs warning ack (%s) — resubmitting once "
+                         "with warningsShown.", warnings)
+                payload = loop.run_until_complete(_submit(warnings))
+                errors = (payload or {}).get("errors")
+                if errors:
+                    log.warning("TR rejected %s %s x%s after warning ack: %s",
+                                side, isin, size, errors)
+                    return OrderResult(False, isin, side, size, 0.0, 1.0,
+                                       f"TR rejected order: {errors}")
+                oid = self._order_id(payload)
+            if oid is None:
+                log.warning("TR order UNCONFIRMED (%s %s x%s) — no order id in "
+                            "response; treating as NOT placed. Raw payload: %r",
+                            side, isin, size, payload)
+                return OrderResult(False, isin, side, size, 0.0, 1.0,
+                                   f"TR order unconfirmed (no order id): {payload!r}")
+            log.info("LIVE order CONFIRMED %s: %s %s x%s on %s",
+                     oid, side, isin, size, exchange)
+            return OrderResult(True, isin, side, size, 0.0, 1.0,
+                               f"live order placed ({oid})")
         except Exception as exc:  # noqa: BLE001
             log.warning("TR order error (%s %s x%s): %s", side, isin, size, exc)
             return OrderResult(False, isin, side, size, 0.0, 1.0,

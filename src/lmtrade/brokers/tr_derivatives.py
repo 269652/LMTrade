@@ -71,6 +71,19 @@ def drop_shared_api(phone: str) -> None:
     _SHARED_APIS.pop(phone, None)
 
 
+async def _recv_for(api: Any, sub_id: Any, max_frames: int = 10) -> Any:
+    """Receive until the frame for OUR subscription arrives. With the shared
+    websocket, recv() can hand back another consumer's frame first — matching
+    on subscription id prevents e.g. an order path consuming a ticker frame
+    (or vice versa) and misreading it as its own response."""
+    for _ in range(max_frames):
+        rid, _, payload = await api.recv()
+        if str(rid) == str(sub_id):
+            return payload
+    raise RuntimeError(f"no response for subscription {sub_id} "
+                       f"within {max_frames} frames")
+
+
 def _resume_once(api: Any) -> bool:
     """resume_websession() exactly once per shared session — a second resume
     on an already-live session can rotate tokens under the open websocket."""
@@ -261,7 +274,7 @@ class PytrDerivatives(TRDerivativesBase):
         """TR's derivative search takes an ISIN, not a ticker — look the
         underlying up first via TR's own instrument search."""
         sub_id = await api.search(underlying, asset_type="stock")
-        _, _, payload = await api.recv()
+        payload = await _recv_for(api, sub_id)
         await api.unsubscribe(sub_id)
         for result in (payload or {}).get("results", []):
             isin = result.get("isin")
@@ -281,7 +294,7 @@ class PytrDerivatives(TRDerivativesBase):
 
     async def _fetch_derivatives(self, api: Any, isin: str) -> list[dict]:
         sub_id = await api.search_derivative(isin, self.PRODUCT_CATEGORY)
-        _, _, payload = await api.recv()
+        payload = await _recv_for(api, sub_id)
         await api.unsubscribe(sub_id)
         log.debug("TR search_derivative(%s, %s) -> %r", isin, self.PRODUCT_CATEGORY, payload)
         return (payload or {}).get("results", [])
@@ -358,7 +371,7 @@ class PytrDerivatives(TRDerivativesBase):
 
             async def _query() -> Any:
                 sub_id = await api.cash()
-                _, _, payload = await api.recv()
+                payload = await _recv_for(api, sub_id)
                 await api.unsubscribe(sub_id)
                 return payload
 
@@ -385,7 +398,7 @@ class PytrDerivatives(TRDerivativesBase):
 
             async def _query() -> Any:
                 sub_id = await api.compact_portfolio()
-                _, _, payload = await api.recv()
+                payload = await _recv_for(api, sub_id)
                 await api.unsubscribe(sub_id)
                 return payload
 
