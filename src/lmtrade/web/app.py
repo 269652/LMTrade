@@ -86,7 +86,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _books["live"] if mode == "live" else _books["paper"]
 
     def store() -> Store:
-        return store_for(control().mode)
+        c = control()
+        # When in live view but NOT armed, show paper store (engine writes there).
+        # Only when genuinely armed for live should we show the live store.
+        if c.mode == "live" and not c.armed:
+            return _books["paper"]
+        return store_for(c.mode)
 
     if STATIC.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
@@ -173,6 +178,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "positions": rows,
             "num_positions": len(rows),
             "provider_warnings": store().get_meta("provider_warnings"),
+            "alpha": store().get_meta("alpha"),
         })
 
     @app.get("/api/trades")
@@ -374,6 +380,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if restarting:
             _schedule_restart()
         return SafeJSONResponse({**result, "restarting": restarting})
+
+    @app.post("/api/dismiss-provider-warning")
+    def dismiss_provider_warning() -> JSONResponse:
+        """Clear the persistent provider warnings from the store so they don't
+        reappear until the next limit event."""
+        store().set_meta("provider_warnings", None)
+        return SafeJSONResponse({"ok": True})
 
     @app.get("/healthz")
     def healthz() -> dict:

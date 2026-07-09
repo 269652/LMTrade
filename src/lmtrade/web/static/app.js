@@ -135,7 +135,9 @@ function paintSummary(s) {
   const banner = $("econ");
   if (econ.self_sustaining) {
     banner.className = "econ-banner econ-ok";
-    banner.innerHTML = `✅ <b>Outperforming SP 500</b> — gains cover all compute.`;
+    const alpha = s.alpha;
+    const alphaText = alpha != null ? (alpha >= 0 ? '+' : '') + fmt(alpha) + ' EUR' : '—';
+    banner.innerHTML = `✅ <b>Outperforming SP 500</b> — alpha ${alphaText}. Runway ${fmt(econ.runway_hours,1)}h.`;
   } else if (econ.halt_trading) {
     banner.className = "econ-banner econ-warn";
     banner.innerHTML = `⛔ <b>Runway below floor</b> (${fmt(econ.runway_hours,1)}h) — new entries halted, managing exits only.`;
