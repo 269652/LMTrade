@@ -134,8 +134,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             cash = float(store().get_meta("cash", settings.budget))
         econ = store().get_meta("economics", {})
-        curve = store().equity_curve(limit=300)
-        equity = curve[-1]["equity"] if curve else (cash or 0.0)
+        
+        # Calculate equity: for live mode, use real cash + position values;
+        # for paper mode, use the recorded equity curve (which includes cash + all holdings).
+        if is_live and cash is not None:
+            # Real live: equity = TR cash + unrealized P&L on open positions
+            positions_value = sum(
+                (m.get("value") or 0.0) for m in store().get_meta("open_option_marks", {}).values()
+            )
+            equity = cash + positions_value
+        else:
+            curve = store().equity_curve(limit=300)
+            equity = curve[-1]["equity"] if curve else (cash or 0.0)
         # Show the FULL book the engine counts toward max_positions: equity
         # positions AND open options/knockouts. Options were previously
         # omitted, so an options-only book (the common case) showed "0
