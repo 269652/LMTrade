@@ -87,14 +87,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
         return html.replace("/static/app.js", f"/static/app.js?v={_asset_version()}")
 
+    def _tr_meta(key: str):
+        """TR account meta (cash/baseline), read from the live book first,
+        falling back to the paper book — the engine writes it into whichever
+        book it's currently trading (unarmed live trades the paper book)."""
+        v = store_for("live").get_meta(key)
+        return v if v is not None else store_for("paper").get_meta(key)
+
     @app.get("/api/summary")
     def summary() -> JSONResponse:
+        is_live = control().mode == "live"
         equity_positions = store().positions()
         open_opts = store().open_options()
-        cash = float(store().get_meta("cash", settings.budget))
+        tr_cash = _tr_meta("tr_account_cash")
+        # LIVE view: cash is the REAL TR balance (None until fetched) — never
+        # default an empty live book to the paper budget, which fabricated a
+        # "100.00 EUR" live net worth. Paper view: the simulated book's cash.
+        if is_live:
+            cash = tr_cash
+        else:
+            cash = float(store().get_meta("cash", settings.budget))
         econ = store().get_meta("economics", {})
         curve = store().equity_curve(limit=300)
-        equity = curve[-1]["equity"] if curve else cash
+        equity = curve[-1]["equity"] if curve else (cash or 0.0)
         # Show the FULL book the engine counts toward max_positions: equity
         # positions AND open options/knockouts. Options were previously
         # omitted, so an options-only book (the common case) showed "0
@@ -126,11 +141,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "mode": store().get_meta("mode", settings.mode),
             "currency": settings.currency,
             "universe": store().get_meta("universe", settings.universe),
-            "cash": round(cash, 4),
+            "cash": round(cash, 4) if cash is not None else None,
             "equity": round(equity, 4),
             "reserve": round(store().reserve_balance(), 4),
-            "tr_account_cash": store().get_meta("tr_account_cash"),
-            "tr_baseline_net_worth": store().get_meta("tr_baseline_net_worth"),
+            "tr_account_cash": tr_cash,
+            "tr_baseline_net_worth": _tr_meta("tr_baseline_net_worth"),
             "last_realized_net_worth": store().get_meta("last_realized_net_worth"),
             "starting_cash": store().get_meta("starting_cash", settings.budget),
             "economics": econ,

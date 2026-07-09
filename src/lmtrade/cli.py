@@ -119,14 +119,15 @@ def run(
 
 
 def _build_engine_for_control(settings, control):
-    """Construct engine + store + broker for the active book. Book follows
-    mode (paper|live); the broker only executes REAL orders when live AND
-    armed — otherwise it's the paper broker (simulated fills into whichever
-    book is active)."""
+    """Construct engine + store + broker for the active book. The LIVE book
+    receives ONLY real fills: it is used exclusively when live AND armed
+    (real TR broker). Unarmed live is a real-account VIEW — the simulation
+    keeps trading the paper book, so the live ledger is never polluted with
+    paper fills and the paper run isn't interrupted by flipping the toggle."""
     from .brokers.paper import PaperBroker
     from .brokers.tr_derivatives import build_tr_derivatives
 
-    book = "live" if control.mode == "live" else "paper"
+    book = "live" if control.live_armed else "paper"
     store = Store(settings.book_db_path(book))
     if control.live_armed:
         from .brokers.trade_republic import TradeRepublicBroker

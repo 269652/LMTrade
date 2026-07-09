@@ -281,6 +281,53 @@ class TestControlPlane:
         assert cclient.get("/api/control").json()["armed"] is False
 
 
+class TestLiveViewRealBalances:
+    """In live mode the summary must reflect the REAL TR account — never
+    fabricate the paper budget for an empty live book, and read the TR cash
+    meta from whichever book the engine is writing it into."""
+
+    @pytest.fixture()
+    def s(self, tmp_path: Path) -> Settings:
+        st = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                      data={"provider": "synthetic"})
+        st.data_dir = tmp_path
+        return st
+
+    def _live(self, s) -> TestClient:
+        c = TestClient(create_app(s))
+        c.post("/api/control/mode", json={"mode": "live"})
+        return c
+
+    def test_empty_live_book_shows_no_fabricated_cash(self, s):
+        data = self._live(s).get("/api/summary").json()
+        assert data["cash"] is None          # not the paper budget 100
+        assert data["tr_account_cash"] is None
+
+    def test_tr_cash_read_from_live_book(self, s):
+        live = Store(s.live_db_path)
+        live.set_meta("tr_account_cash", 55.5)
+        live.close()
+        data = self._live(s).get("/api/summary").json()
+        assert data["cash"] == pytest.approx(55.5)
+        assert data["tr_account_cash"] == pytest.approx(55.5)
+
+    def test_tr_cash_falls_back_to_paper_book_copy(self, s):
+        # The engine writes tr_account_cash into whichever book it trades —
+        # with unarmed live trading the paper book, the meta lands there.
+        paper = Store(s.db_path)
+        paper.set_meta("tr_account_cash", 77.7)
+        paper.close()
+        data = self._live(s).get("/api/summary").json()
+        assert data["tr_account_cash"] == pytest.approx(77.7)
+
+    def test_paper_mode_unaffected(self, s):
+        paper = Store(s.db_path)
+        paper.set_meta("cash", 42.0)
+        paper.close()
+        data = TestClient(create_app(s)).get("/api/summary").json()
+        assert data["cash"] == pytest.approx(42.0)
+
+
 class TestReserveInSummary:
     def test_summary_exposes_reserve(self, tmp_path):
         s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
