@@ -505,6 +505,12 @@ class Engine:
         cash = self.broker.cash()
         total_value = self._positions_value(prices) + self._options_value(prices)
         self._persist_option_marks(prices)
+        if self.tr_derivatives is not None:
+            # Live TR account cash for the dashboard (None-safe: no-op without
+            # a real authenticated TR client).
+            tr_cash = self.tr_derivatives.account_cash()
+            if tr_cash is not None:
+                self.store.set_meta("tr_account_cash", tr_cash)
         econ = self.accountant.snapshot(cash, total_value, self.store.reserve_balance())
         self.store.set_meta("economics", econ.as_dict())
         self._update_benchmark(prices)

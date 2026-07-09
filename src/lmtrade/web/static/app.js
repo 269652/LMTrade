@@ -55,7 +55,7 @@ function paintSummary(s) {
   $("reserve").textContent = fmt(s.reserve != null ? s.reserve : (econ.reserve_eur || 0)) + " " + cur;
   $("npos").textContent = s.num_positions;
   const compute = (econ.gpu_cost_accrued_usd || 0) + (econ.inference_cost_usd || 0);
-  $("compute").textContent = "$" + fmt(compute, 4);
+  $("trcash").textContent = s.tr_account_cash != null ? fmt(s.tr_account_cash) + " " + cur : "—";
 
   const banner = $("econ");
   if (econ.self_sustaining) {

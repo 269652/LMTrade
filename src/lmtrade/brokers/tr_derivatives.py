@@ -71,6 +71,28 @@ class TRDerivativeQuote:
     issuer: str = ""
 
 
+def _parse_cash(payload: Any) -> float | None:
+    """TR's `cash` subscription returns per-currency balances,
+    e.g. [{"currencyId": "EUR", "amount": 123.45}]. Prefer EUR; fall back to
+    the first parseable amount; None if the shape isn't recognized."""
+    entries = payload if isinstance(payload, list) else None
+    if entries is None:
+        return None
+    best: float | None = None
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        try:
+            amount = float(e.get("amount"))
+        except (TypeError, ValueError):
+            continue
+        if str(e.get("currencyId", "")).upper() == "EUR":
+            return amount
+        if best is None:
+            best = amount
+    return best
+
+
 class TRDerivativesBase:
     """Interface: find the best-fitting real KO instrument for a signal."""
 
@@ -79,6 +101,12 @@ class TRDerivativesBase:
 
     def search(self, underlying: str, direction: str) -> list[TRDerivativeQuote]:
         raise NotImplementedError
+
+    def account_cash(self) -> float | None:
+        """Live TR account cash balance (account currency). None unless a real
+        authenticated TR client overrides this — paper/fake clients have no
+        real account."""
+        return None
 
     def find_knockout(self, underlying: str, direction: str, spot: float,
                       target_leverage: float) -> TRDerivativeQuote | None:
@@ -215,6 +243,7 @@ class PytrDerivatives(TRDerivativesBase):
 
             items = asyncio.get_event_loop().run_until_complete(_query())
             out: list[TRDerivativeQuote] = []
+            first_error: Exception | None = None
             for item in items:
                 try:
                     out.append(TRDerivativeQuote(
@@ -230,12 +259,50 @@ class PytrDerivatives(TRDerivativesBase):
                         price=float(item.get("ask", 0) or 0),
                         leverage=float(item.get("leverage", 0) or 0),
                         issuer=str(item.get("issuerDisplayName", ""))))
-                except (KeyError, TypeError, ValueError):
+                except (KeyError, TypeError, ValueError) as exc:
+                    if first_error is None:
+                        first_error = exc
                     continue  # tolerate payload drift per-instrument
+            if items and not out:
+                # TR returned instruments but our field mapping matched none —
+                # this is exactly why positions silently become synthetic
+                # options (no ISIN). Dump the real field names so the mapping
+                # above can be corrected against a live account; without TR
+                # access from the dev environment this is unverifiable in code.
+                log.warning(
+                    "TR knockout search for %s: %d instrument(s) returned but "
+                    "NONE parsed (first error: %r). Actual fields on the first "
+                    "item: %s. The response field mapping in tr_derivatives.py "
+                    "needs updating for your pytr/TR version — falling back to "
+                    "synthetic options (no ISIN) meanwhile.",
+                    underlying, len(items), first_error, sorted(items[0].keys()))
+            elif out:
+                log.info("TR knockout search for %s: %d raw -> %d usable instrument(s).",
+                         underlying, len(items), len(out))
+            else:
+                log.debug("TR knockout search for %s: no instruments returned.", underlying)
             return out
         except Exception as exc:  # noqa: BLE001
             log.warning("TR derivative search failed (%s).", exc)
             return []
+
+    def account_cash(self) -> float | None:
+        api = self._login()
+        if api is None:
+            return None
+        try:
+            import asyncio
+
+            async def _query() -> Any:
+                sub_id = await api.cash()
+                _, _, payload = await api.recv()
+                await api.unsubscribe(sub_id)
+                return payload
+
+            return _parse_cash(asyncio.get_event_loop().run_until_complete(_query()))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("TR account cash fetch failed (%s).", exc)
+            return None
 
 
 def build_tr_derivatives(settings: Settings) -> TRDerivativesBase | None:

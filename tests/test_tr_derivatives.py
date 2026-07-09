@@ -82,11 +82,14 @@ class FakeAsyncTRApi:
     logic be tested without the optional pytr dependency installed and
     without ever touching TR's real (websocket) API."""
 
-    def __init__(self, resume_ok=True, search_results=None, derivative_results=None):
+    def __init__(self, resume_ok=True, search_results=None, derivative_results=None,
+                 cash_payload=None):
         self.resume_ok = resume_ok
         self._search_results = (
             search_results if search_results is not None else [{"isin": "US0378331005"}])
         self._derivative_results = derivative_results if derivative_results is not None else []
+        self._cash_payload = (cash_payload if cash_payload is not None
+                              else [{"currencyId": "EUR", "amount": 42.5}])
         self.calls: list[tuple] = []
 
     def resume_websession(self) -> bool:
@@ -100,10 +103,16 @@ class FakeAsyncTRApi:
         self.calls.append(("search_derivative", isin, product_type))
         return "sub-deriv"
 
+    async def cash(self):
+        self.calls.append(("cash",))
+        return "sub-cash"
+
     async def recv(self):
         kind = self.calls[-1][0]
         if kind == "search":
             return ("sub-search", {}, {"results": self._search_results})
+        if kind == "cash":
+            return ("sub-cash", {}, self._cash_payload)
         return ("sub-deriv", {}, {"results": self._derivative_results})
 
     async def unsubscribe(self, sub_id):
@@ -257,6 +266,75 @@ class TestPytrSearchGlue:
         assert api.calls == []
 
 
+class TestPytrAccountCash:
+    """Live TR account cash balance for the dashboard (replaces the GPU/
+    compute card). Parses TR's per-currency cash payload; degrades to None."""
+
+    def test_parses_eur_amount(self):
+        api = FakeAsyncTRApi(cash_payload=[{"currencyId": "EUR", "amount": 123.45}])
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        assert client.account_cash() == pytest.approx(123.45)
+
+    def test_prefers_eur_over_other_currencies(self):
+        api = FakeAsyncTRApi(cash_payload=[
+            {"currencyId": "USD", "amount": 10.0},
+            {"currencyId": "EUR", "amount": 55.0}])
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        assert client.account_cash() == pytest.approx(55.0)
+
+    def test_none_when_unavailable(self):
+        api = FakeAsyncTRApi(resume_ok=False)
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        assert client.account_cash() is None
+
+    def test_none_on_malformed_payload(self):
+        api = FakeAsyncTRApi(cash_payload={"unexpected": "shape"})
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        assert client.account_cash() is None
+
+    def test_base_and_fake_default_to_none(self):
+        assert FakeTRDerivatives(catalog={}).account_cash() is None
+
+
+class TestPytrSearchDiagnostics:
+    """When TR returns instruments but none parse (guessed field names don't
+    match TR's real schema), the result is a silent fall-back to synthetic
+    options with no ISIN. The search must log LOUDLY what TR actually
+    returned so the field mapping can be corrected against real data."""
+
+    def test_warns_with_field_names_when_none_parse(self, caplog):
+        import logging
+
+        # Realistic-but-different schema: strike is under "strikePrice", etc.
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results=[
+                {"isin": "DE1", "strikePrice": 100.0, "leverageFactor": 5.0, "askPrice": 2.0},
+                {"isin": "DE2", "strikePrice": 90.0, "leverageFactor": 6.0, "askPrice": 1.5},
+            ])
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        with caplog.at_level(logging.WARNING, logger="lmtrade.tr"):
+            out = client.search("AAPL", "buy")
+        assert out == []
+        blob = " ".join(r.message for r in caplog.records)
+        assert "2" in blob                     # reported the raw count
+        assert "strikePrice" in blob           # dumped the real field names
+
+    def test_info_reports_usable_count_on_success(self, caplog):
+        import logging
+
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results=[
+                {"isin": "DE1", "strike": 100.0, "ask": 2.0, "leverage": 5.0}])
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        with caplog.at_level(logging.INFO, logger="lmtrade.tr"):
+            out = client.search("AAPL", "buy")
+        assert len(out) == 1
+        blob = " ".join(r.message for r in caplog.records)
+        assert "AAPL" in blob
+
+
 class TestFakeClient:
     def test_search_returns_ko_quotes_sorted_by_leverage_fit(self):
         fake = FakeTRDerivatives(catalog={
@@ -314,6 +392,15 @@ class TestEngineIntegration:
         assert opts
         assert opts[0]["instrument_type"] == "option"   # legacy path unchanged
         assert opts[0]["isin"] is None
+
+    def test_run_cycle_persists_tr_account_cash(self, settings, store):
+        class CashClient(FakeTRDerivatives):
+            def account_cash(self):
+                return 314.15
+
+        engine = self._engine(settings, store, CashClient(catalog={}))
+        engine.run_cycle()
+        assert store.get_meta("tr_account_cash") == pytest.approx(314.15)
 
     def test_knockout_position_knocked_out_when_barrier_touched(self, settings, store):
         client = FakeTRDerivatives(catalog={

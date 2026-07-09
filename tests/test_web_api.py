@@ -167,6 +167,21 @@ class TestReserveInSummary:
         assert data["reserve"] == pytest.approx(12.5)
 
 
+class TestTrAccountCashInSummary:
+    def test_summary_exposes_tr_account_cash(self, tmp_path):
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        store.set_meta("tr_account_cash", 987.65)
+        store.close()
+        data = TestClient(create_app(s)).get("/api/summary").json()
+        assert data["tr_account_cash"] == pytest.approx(987.65)
+
+    def test_tr_account_cash_none_by_default(self, client):
+        assert client.get("/api/summary").json()["tr_account_cash"] is None
+
+
 class TestInfiniteRunwayJsonSafety:
     """gpu_usd_per_hour=0 (no GPU rented) makes runway_hours float('inf') —
     Starlette's JSONResponse (allow_nan=False) crashes on that unless it's
