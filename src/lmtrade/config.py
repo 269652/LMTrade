@@ -101,6 +101,10 @@ class ResearchConfig(BaseModel):
     # "anthropic" (needs ANTHROPIC_API_KEY) or "claude_cli" (local `claude`
     # CLI, no API key).
     analysis_provider: str = "anthropic"
+    # Per-call timeout for the local `claude` CLI. A single web-search-backed
+    # research/analysis call routinely takes well over a minute, so the
+    # default is generous; raise it further on a slow connection.
+    claude_cli_timeout_seconds: float = 180.0
 
 
 class OptionsConfig(BaseModel):

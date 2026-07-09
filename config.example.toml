@@ -92,6 +92,9 @@ news_interval_minutes = 60           # hourly news
 daily_analysis_interval_hours = 24   # daily strategy review
 news_provider = "perplexity"         # perplexity | claude_cli (local, no key)
 analysis_provider = "anthropic"      # anthropic | claude_cli (local, no key)
+claude_cli_timeout_seconds = 180     # per-call timeout for the local claude
+                                     # CLI; web-search calls exceed 60s, raise
+                                     # further on a slow connection
 
 # Fully-local example: no ANTHROPIC_API_KEY / PERPLEXITY_API_KEY needed —
 # news, daily analysis and decision-making all run through your local

@@ -184,3 +184,31 @@ class TestClaudeCLIProvider:
         providers = build_providers(settings)
         assert "claude_cli" in providers
         assert isinstance(providers["claude_cli"], ClaudeCLIProvider)
+
+
+class TestClaudeCLITimeout:
+    """A single web-search research call routinely takes longer than the old
+    60s default (some symbols timed out live), so the timeout must be
+    configurable and default generously."""
+
+    def test_default_timeout_is_generous(self):
+        from lmtrade.models.providers import CLAUDE_CLI_TIMEOUT
+
+        assert CLAUDE_CLI_TIMEOUT >= 120
+        assert ClaudeCLIProvider().timeout == CLAUDE_CLI_TIMEOUT
+
+    def test_timeout_configurable_via_settings(self):
+        settings = Settings(research={"claude_cli_timeout_seconds": 240})
+        assert ClaudeCLIProvider(settings).timeout == 240
+
+    def test_timeout_passed_to_runner(self, monkeypatch):
+        monkeypatch.setattr(
+            "lmtrade.models.providers.shutil.which", lambda name: "/usr/bin/claude"
+        )
+        seen = {}
+        settings = Settings(research={"claude_cli_timeout_seconds": 200})
+        provider = ClaudeCLIProvider(
+            settings, runner=lambda p, t: seen.setdefault("timeout", t) or "SENTIMENT: neutral"
+        )
+        provider.research("AAPL")
+        assert seen["timeout"] == 200

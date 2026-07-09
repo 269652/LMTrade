@@ -25,7 +25,7 @@ from .base import ModelProvider, Signal
 
 log = get_logger("lmtrade.models")
 
-CLAUDE_CLI_TIMEOUT = 60.0
+CLAUDE_CLI_TIMEOUT = 180.0   # web-search research calls routinely exceed 60s
 CLAUDE_CLI_BIN = "claude"
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -215,7 +215,8 @@ class ClaudeCLIProvider(ModelProvider):
 
     def __init__(self, settings: Settings | None = None,
                  runner: Callable[[str, float], str] | None = None):
-        self.timeout = CLAUDE_CLI_TIMEOUT
+        self.timeout = (settings.research.claude_cli_timeout_seconds
+                        if settings is not None else CLAUDE_CLI_TIMEOUT)
         self._runner = runner or _default_claude_cli_runner
 
     def available(self) -> bool:

@@ -129,6 +129,25 @@ class TestNewsServiceConcurrentFetch:
         svc = NewsService(store, settings, fetcher=None)
         assert svc.get_many(["AAPL", "MSFT"]) == {"AAPL": None, "MSFT": None}
 
+    def test_get_many_reports_live_progress(self, store, settings):
+        """A slow real fetcher (claude CLI web search) makes get_many block for
+        minutes; an on_progress callback fired per completion lets the engine
+        show live progress instead of appearing hung."""
+        svc = NewsService(store, settings,
+                          fetcher=lambda s: (f"{s}. SENTIMENT: bullish", 0.0))
+        seen = []
+        svc.get_many(["AAPL", "MSFT", "SPY"], max_workers=3,
+                     on_progress=lambda sym, item, done, total: seen.append((done, total, sym)))
+        assert len(seen) == 3
+        assert [d for d, _, _ in seen] == [1, 2, 3]        # monotonic completion count
+        assert all(t == 3 for _, t, _ in seen)
+        assert {s for _, _, s in seen} == {"AAPL", "MSFT", "SPY"}
+
+    def test_get_many_progress_optional(self, store, settings):
+        svc = NewsService(store, settings, fetcher=lambda s: ("x. SENTIMENT: neutral", 0.0))
+        # No callback provided — must still work.
+        assert set(svc.get_many(["AAPL"]).keys()) == {"AAPL"}
+
     def test_fetch_cost_recorded(self, store, settings):
         svc = NewsService(store, settings,
                           fetcher=lambda s: ("x. SENTIMENT: neutral", 0.005))

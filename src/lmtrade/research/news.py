@@ -8,7 +8,7 @@ key)."""
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from ..config import Settings, secret
@@ -68,14 +68,34 @@ class NewsService:
         self.store.add_news(symbol, text, sentiment, ts=self.now())
         return {"symbol": symbol, "text": text, "sentiment": sentiment, "ts": self.now()}
 
-    def get_many(self, symbols: list[str], max_workers: int = 8) -> dict[str, dict | None]:
+    def get_many(
+        self, symbols: list[str], max_workers: int = 8,
+        on_progress: Callable[[str, dict | None, int, int], None] | None = None,
+    ) -> dict[str, dict | None]:
         """Fetch news for many symbols in parallel, bounded by max_workers —
         a sequential per-symbol loop is impractical once the fetcher has real
         per-call latency (e.g. a claude CLI subprocess doing a web search)
         across a large universe. A failing symbol resolves to whatever get()
-        would have returned (cache or None) without affecting the others."""
+        would have returned (cache or None) without affecting the others.
+
+        `on_progress(symbol, item, done, total)` is invoked (in the calling
+        thread, so it's safe to log/write from) as each symbol completes, so
+        callers can show live progress instead of the fetch looking hung for
+        minutes. The returned dict preserves the input symbol order."""
         if not symbols:
             return {}
-        with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(symbols)))) as pool:
-            results = list(pool.map(self.get, symbols))
-        return dict(zip(symbols, results))
+        total = len(symbols)
+        results: dict[str, dict | None] = {}
+        with ThreadPoolExecutor(max_workers=max(1, min(max_workers, total))) as pool:
+            futures = {pool.submit(self.get, s): s for s in symbols}
+            done = 0
+            for fut in as_completed(futures):
+                symbol = futures[fut]
+                try:
+                    results[symbol] = fut.result()
+                except Exception:  # noqa: BLE001 — one symbol must not sink the batch
+                    results[symbol] = None
+                done += 1
+                if on_progress is not None:
+                    on_progress(symbol, results[symbol], done, total)
+        return {s: results.get(s) for s in symbols}

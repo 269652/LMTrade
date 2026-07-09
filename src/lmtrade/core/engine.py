@@ -128,19 +128,39 @@ class Engine:
     def _run_scheduled_jobs(self) -> None:
         news_iv = self.settings.research.news_interval_minutes * 60
         if self.scheduler.due("news", news_iv):
-            results = self.news.get_many(
-                self.settings.universe, max_workers=min(8, len(self.settings.universe)))
-            for symbol in self.settings.universe:
-                item = results.get(symbol)
+            universe = self.settings.universe
+            provider = self.settings.research.news_provider
+            self.bus.info(
+                f"[research] fetching news for {len(universe)} symbols "
+                f"(provider={provider}) — this can take a few minutes with a "
+                f"live web-search provider...", source="research")
+
+            def _news_progress(symbol: str, item: dict | None, done: int, total: int) -> None:
+                # Fired as each symbol completes (in the calling thread), so
+                # the run shows live progress instead of appearing hung.
                 if item:
                     self.bus.activity(
-                        "signal", f"news {symbol}: {item['sentiment']}", symbol,
-                        {"text": str(item.get("text", ""))[:300]})
+                        "signal", f"news {done}/{total} {symbol}: {item['sentiment']}",
+                        symbol, {"text": str(item.get("text", ""))[:300]})
+                else:
+                    self.bus.info(f"[research] news {done}/{total} {symbol}: no data",
+                                  source="research")
+
+            self.news.get_many(universe, max_workers=min(8, len(universe)),
+                               on_progress=_news_progress)
+            self.bus.info("[research] news fetch complete", source="research")
         daily_iv = self.settings.research.daily_analysis_interval_hours * 3600
         if self.scheduler.due("daily_analysis", daily_iv):
+            provider = self.settings.research.analysis_provider
+            self.bus.info(
+                f"[research] compiling daily market analysis (provider={provider})...",
+                source="research")
             result = self.analyst.run()
             if result:
-                self.bus.info(f"daily analysis applied: {result['applied']}",
+                self.bus.info(f"[research] daily analysis applied: {result['applied']}",
+                              source="research")
+            else:
+                self.bus.info("[research] daily analysis unavailable or no change",
                               source="research")
 
     # ---------------------------------------------------------------- benchmark
