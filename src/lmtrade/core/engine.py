@@ -146,7 +146,12 @@ class Engine:
 
     # ------------------------------------------------------------ research jobs
     def _run_scheduled_jobs(self) -> None:
-        news_iv = self.settings.research.news_interval_minutes * 60
+        # The news pass fires on the (shorter) retry cadence; get()/get_many
+        # only actually refetch a symbol whose cache is missing or older than
+        # news_interval_minutes, so healthy symbols aren't re-fetched — only
+        # failed/corrupted ones retry sooner (default every 10 min).
+        news_iv = min(self.settings.research.news_interval_minutes,
+                      self.settings.research.news_retry_minutes) * 60
         if self.scheduler.due("news", news_iv):
             universe = self.settings.universe
             provider = self.settings.research.news_provider
@@ -170,17 +175,30 @@ class Engine:
                                on_progress=_news_progress)
             self.bus.info("[research] news fetch complete", source="research")
         daily_iv = self.settings.research.daily_analysis_interval_hours * 3600
-        if self.scheduler.due("daily_analysis", daily_iv):
+        # Compile a fresh per-symbol analysis when the schedule is due OR when
+        # none exists yet — an empty analysis (e.g. right after a reset) is
+        # important missing signal, so we compile it before the first trades
+        # rather than waiting a full day. `due()` is called first so its
+        # last-run stamp advances on the scheduled path.
+        analysis_missing = not self.store.get_meta("market_analysis")
+        if self.scheduler.due("daily_analysis", daily_iv) or analysis_missing:
             provider = self.settings.research.analysis_provider
             self.bus.info(
-                f"[research] compiling daily market analysis (provider={provider})...",
-                source="research")
+                f"[research] compiling daily market analysis (provider={provider}) "
+                f"for {len(self.settings.universe)} symbols...", source="research")
+            analysis = self.analyst.compile_analysis(self.settings.universe, self.now())
+            if analysis:
+                self.bus.info(
+                    f"[research] daily analysis compiled: {len(analysis['symbols'])} "
+                    f"symbols", source="research")
+            else:
+                self.bus.warn("[research] daily analysis could not be compiled "
+                              "(provider unavailable or empty) — will retry.",
+                              source="research")
+            # The risk-parameter review is a separate, best-effort step.
             result = self.analyst.run()
             if result:
-                self.bus.info(f"[research] daily analysis applied: {result['applied']}",
-                              source="research")
-            else:
-                self.bus.info("[research] daily analysis unavailable or no change",
+                self.bus.info(f"[research] risk review applied: {result['applied']}",
                               source="research")
 
     def _update_realized_mark(self, net_worth: float) -> None:
@@ -549,6 +567,12 @@ class Engine:
             tr_cash = self.tr_derivatives.account_cash()
             if tr_cash is not None:
                 self.store.set_meta("tr_account_cash", tr_cash)
+                # First real balance we ever see becomes the live P&L baseline
+                # (positions are ~empty at that point), so live P&L reflects the
+                # change since going live rather than a meaningless delta vs the
+                # paper starting budget.
+                if self.store.get_meta("tr_baseline_net_worth") is None:
+                    self.store.set_meta("tr_baseline_net_worth", tr_cash)
         econ = self.accountant.snapshot(cash, total_value, self.store.reserve_balance())
         self.store.set_meta("economics", econ.as_dict())
         self._update_realized_mark(econ.net_worth_eur)

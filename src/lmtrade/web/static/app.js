@@ -62,26 +62,45 @@ function paintSummary(s) {
   if (!window._ctrl) { mode.textContent = s.mode; mode.className = "badge " + (s.mode === "live" ? "live" : "paper"); }
 
   const econ = s.economics || {};
-  const net = econ.net_worth_eur != null ? econ.net_worth_eur : s.equity;
-  const pnl = econ.pnl_eur != null ? econ.pnl_eur : net - (s.starting_cash || 0);
-  $("net").textContent = fmt(net) + " " + cur;
-  const pnlEl = $("pnl");
-  pnlEl.textContent = (pnl >= 0 ? "▲ " : "▼ ") + fmt(pnl) + " " + cur + " P&L";
-  pnlEl.className = "sub";
-  // Net worth is red while mark-to-market sits below the last REALIZED net
-  // worth (the value locked in at the most recent closed trade), green at or
-  // above. Falls back to starting cash before any trade closes.
-  const mark = s.last_realized_net_worth != null ? s.last_realized_net_worth : (s.starting_cash || 0);
-  $("net").className = "v " + (net < mark - 1e-9 ? "neg" : "pos");
-
-  // In live mode the headline cash is the real TR account balance. Warn
-  // (amber) below the low-balance threshold, where the flat ~1 EUR fee is a
-  // >1% drag — the same threshold that triggers the double-arm guard.
   const ctrl = window._ctrl || {};
-  const liveCash = ctrl.mode === "live" && s.tr_account_cash != null ? s.tr_account_cash : s.cash;
+  const isLive = ctrl.mode === "live";
+  const posValue = (s.positions || []).reduce((a, p) => a + (p.value || 0), 0);
+
+  // In LIVE mode the headline figures are the REAL Trade Republic account —
+  // cash from the live balance, net worth = real cash + open position value,
+  // P&L vs the baseline captured when live began. Shown as "—" (never the
+  // simulated paper 100) until the real balance is actually fetched. In paper
+  // mode they're the simulated book's economics.
+  let net, cash, pnl, netKnown;
+  if (isLive) {
+    cash = s.tr_account_cash;
+    net = cash != null ? cash + posValue : null;
+    netKnown = net != null;
+    const base = s.tr_baseline_net_worth != null ? s.tr_baseline_net_worth : cash;
+    pnl = netKnown ? net - base : null;
+  } else {
+    cash = s.cash;
+    net = econ.net_worth_eur != null ? econ.net_worth_eur : s.equity;
+    netKnown = true;
+    pnl = econ.pnl_eur != null ? econ.pnl_eur : net - (s.starting_cash || 0);
+  }
+
+  $("net").textContent = netKnown ? fmt(net) + " " + cur : "—";
+  const pnlEl = $("pnl");
+  pnlEl.className = "sub";
+  if (pnl != null) {
+    pnlEl.textContent = (pnl >= 0 ? "▲ " : "▼ ") + fmt(pnl) + " " + cur + " P&L";
+  } else {
+    pnlEl.textContent = isLive ? "awaiting live TR balance…" : "—";
+  }
+  // Net worth is red while mark-to-market sits below the last REALIZED net
+  // worth (locked in at the most recent closed trade), green at or above.
+  const mark = s.last_realized_net_worth != null ? s.last_realized_net_worth : (s.starting_cash || 0);
+  $("net").className = "v " + (!netKnown ? "" : net < mark - 1e-9 ? "neg" : "pos");
+
   const cashEl = $("cash");
-  cashEl.textContent = fmt(liveCash) + " " + cur;
-  cashEl.className = "v" + (ctrl.mode === "live" && ctrl.low_balance ? " warn" : "");
+  cashEl.textContent = cash != null ? fmt(cash) + " " + cur : "—";
+  cashEl.className = "v" + (isLive && ctrl.low_balance ? " warn" : "");
   $("reserve").textContent = fmt(s.reserve != null ? s.reserve : (econ.reserve_eur || 0)) + " " + cur;
   $("npos").textContent = s.num_positions;
   const compute = (econ.gpu_cost_accrued_usd || 0) + (econ.inference_cost_usd || 0);

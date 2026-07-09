@@ -105,6 +105,11 @@ class ResearchConfig(BaseModel):
     # research/analysis call routinely takes well over a minute, so the
     # default is generous; raise it further on a slow connection.
     claude_cli_timeout_seconds: float = 180.0
+    # How often the news pass runs. Successful symbols are still only refetched
+    # once news_interval_minutes elapses (served from cache meanwhile), so this
+    # shorter cadence just lets FAILED/corrupted symbols retry sooner instead of
+    # waiting the full hour.
+    news_retry_minutes: int = 10
 
 
 class OptionsConfig(BaseModel):

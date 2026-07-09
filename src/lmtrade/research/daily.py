@@ -145,3 +145,68 @@ class DailyAnalyst:
             detail={"applied": applied, "notes": notes},
         )
         return {"applied": applied, "notes": notes}
+
+    # -- market analysis compilation ---------------------------------------------
+    def _analysis_prompt(self, universe: list[str]) -> str:
+        return (
+            "You are compiling a daily market analysis for an automated trading "
+            "bot. If you have web search available, USE IT to ground this in "
+            "today's real market conditions — do not rely on prior/training "
+            "knowledge. For each of these instruments give a directional bias for "
+            f"the next ~24h:\n{', '.join(universe)}\n\n"
+            "Respond ONLY with JSON of the form: "
+            '{"symbols": {"AAPL": {"bias": "bullish|bearish|neutral", '
+            '"confidence": 0.0-1.0, "notes": "one sentence"}, ...}} — cover every '
+            "symbol; use neutral with low confidence where you have no real signal "
+            "rather than guessing."
+        )
+
+    def compile_analysis(self, universe: list[str], now_ts: float) -> dict | None:
+        """Compile a per-symbol directional bias for the universe and store it
+        as the `market_analysis` meta the Analysis tab and the decision engine's
+        analysis signal both read. Runs on startup when none exists (important
+        signal) and on the daily schedule thereafter. Returns the analysis, or
+        None when unavailable/unusable."""
+        if self.caller is None or not universe:
+            return None
+        try:
+            text, cost = self.caller(self._analysis_prompt(universe))
+        except Exception:  # noqa: BLE001 — never crash the engine
+            return None
+        if cost > 0:
+            self.store.record_cost("inference", cost, "analysis")
+        m = _JSON_RE.search(text or "")
+        if not m:
+            return None
+        try:
+            obj = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return None
+
+        clean: dict[str, dict] = {}
+        for sym, v in (obj.get("symbols") or {}).items():
+            if not isinstance(v, dict):
+                continue
+            bias = str(v.get("bias", "neutral")).lower()
+            if bias not in ("bullish", "bearish", "neutral"):
+                bias = "neutral"
+            try:
+                conf = max(0.0, min(1.0, float(v.get("confidence", 0.4))))
+            except (TypeError, ValueError):
+                conf = 0.4
+            clean[sym] = {"bias": bias, "confidence": conf,
+                          "notes": str(v.get("notes", ""))[:200]}
+        if not clean:
+            return None
+
+        analysis = {
+            "valid_hours": self.settings.research.daily_analysis_interval_hours,
+            "ts": now_ts,
+            "symbols": clean,
+        }
+        self.store.set_meta("market_analysis", analysis)
+        biases = [f"{k}:{x['bias']}" for k, x in list(clean.items())[:6]]
+        self.store.add_activity(
+            "insight", f"daily analysis compiled: {len(clean)} symbols",
+            detail={"sample": biases})
+        return analysis
