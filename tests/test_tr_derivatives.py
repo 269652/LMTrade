@@ -402,6 +402,61 @@ class TestEngineIntegration:
         engine.run_cycle()
         assert store.get_meta("tr_account_cash") == pytest.approx(314.15)
 
+    def test_armed_live_broker_places_real_knockout_order(self, settings, store):
+        from lmtrade.brokers.base import OrderResult
+
+        placed = []
+
+        class ArmedBroker:
+            mode = "live"
+            armed = True
+
+            def cash(self):
+                return 1000.0
+
+            def place_order(self, isin, side, size, exchange="LSX"):
+                placed.append({"isin": isin, "side": side, "size": size})
+                return OrderResult(True, isin, side, size, 0.0, 1.0, "live order placed")
+
+        client = FakeTRDerivatives(catalog={
+            "AAPL": [TRDerivativeQuote(isin="DE000LIVE", underlying="AAPL",
+                                       kind="ko_call", strike=80.0, barrier=80.0,
+                                       ratio=10.0, price=2.0, leverage=5.0,
+                                       issuer="Bank")]})
+        market = ScriptedMarket({"AAPL": Quote("AAPL", 100.0, buy_signal_history(80.0), "yahoo")})
+        engine = Engine(settings, store, ArmedBroker(), market=market, tr_derivatives=client)
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert placed, "a real order should have been placed"
+        assert placed[0]["isin"] == "DE000LIVE"
+        assert placed[0]["side"] == "buy"
+        # Position recorded in the (live) book with the real ISIN.
+        opts = store.open_options()
+        assert opts and opts[0]["isin"] == "DE000LIVE"
+
+    def test_rejected_live_order_opens_no_position(self, settings, store):
+        from lmtrade.brokers.base import OrderResult
+
+        class RejectBroker:
+            mode = "live"
+            armed = True
+
+            def cash(self):
+                return 1000.0
+
+            def place_order(self, isin, side, size, exchange="LSX"):
+                return OrderResult(False, isin, side, size, 0.0, 1.0, "TR rejected")
+
+        client = FakeTRDerivatives(catalog={
+            "AAPL": [TRDerivativeQuote(isin="DE000X", underlying="AAPL",
+                                       kind="ko_call", strike=80.0, barrier=80.0,
+                                       ratio=10.0, price=2.0, leverage=5.0, issuer="B")]})
+        market = ScriptedMarket({"AAPL": Quote("AAPL", 100.0, buy_signal_history(80.0), "yahoo")})
+        engine = Engine(settings, store, RejectBroker(), market=market, tr_derivatives=client)
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert store.open_options() == []   # no fallback to synthetic when live-armed
+
     def test_knockout_position_knocked_out_when_barrier_touched(self, settings, store):
         client = FakeTRDerivatives(catalog={
             "AAPL": [TRDerivativeQuote(isin="DE000KO1", underlying="AAPL",

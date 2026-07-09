@@ -112,16 +112,59 @@ def run(
         p = web_port or settings.web.port
         _launch_dashboard(settings, h, p)
         console.print(f"[cyan]Dashboard →[/cyan] http://{h}:{p}")
-    store = Store(settings.db_path)
-    broker = build_broker(settings, store)
-    engine = Engine(settings, store, broker)
-    _print_diagnostics(settings, engine)
     try:
-        engine.run_forever(max_cycles=cycles or None)
+        _run_with_control(settings, cycles or None)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted — stopping engine.[/yellow]")
-    finally:
-        store.close()
+
+
+def _build_engine_for_control(settings, control):
+    """Construct engine + store + broker for the active book. Book follows
+    mode (paper|live); the broker only executes REAL orders when live AND
+    armed — otherwise it's the paper broker (simulated fills into whichever
+    book is active)."""
+    from .brokers.paper import PaperBroker
+    from .brokers.tr_derivatives import build_tr_derivatives
+
+    book = "live" if control.mode == "live" else "paper"
+    store = Store(settings.book_db_path(book))
+    if control.live_armed:
+        from .brokers.trade_republic import TradeRepublicBroker
+        broker = TradeRepublicBroker(store, settings, armed=True)
+        console.print("[bold red]⚠ LIVE + ARMED — real Trade Republic orders "
+                      "will be placed. Against TR ToS.[/bold red]")
+    else:
+        broker = PaperBroker(store, starting_cash=settings.budget)
+    tr = build_tr_derivatives(settings)
+    engine = Engine(settings, store, broker, tr_derivatives=tr)
+    return engine, store
+
+
+def _run_with_control(settings, max_cycles):
+    """Drive the engine, rebuilding it whenever the dashboard flips the
+    paper/live toggle or arms/disarms live execution."""
+    from .core.control import ControlState
+
+    remaining = max_cycles
+    while True:
+        control = ControlState.load(settings.control_path)
+        snapshot = (control.mode, control.armed)
+        engine, store = _build_engine_for_control(settings, control)
+        _print_diagnostics(settings, engine)
+        try:
+            engine.run_forever(
+                max_cycles=remaining,
+                rebuild_when=lambda: (
+                    lambda c: (c.mode, c.armed) != snapshot
+                )(ControlState.load(settings.control_path)),
+            )
+        finally:
+            store.close()
+        # If control is unchanged, run_forever returned because it finished
+        # (max_cycles) or was stopped — don't loop forever rebuilding.
+        if (ControlState.load(settings.control_path).mode,
+                ControlState.load(settings.control_path).armed) == snapshot:
+            break
 
 
 @app.command()

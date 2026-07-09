@@ -206,6 +206,81 @@ class TestRealizedPnl:
         assert data["rows"] == []
 
 
+class TestControlPlane:
+    """The paper/live toggle and armed live-execution guard, driven from the
+    dashboard. Book-aware: reads/writes switch between the paper and live
+    databases with the mode."""
+
+    @pytest.fixture()
+    def app_settings(self, tmp_path: Path) -> Settings:
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        # Distinct marker rows in each book so we can prove the view switches.
+        paper = Store(s.db_path)
+        paper.set_meta("starting_cash", 100.0)
+        paper.close()
+        live = Store(s.live_db_path)
+        live.set_meta("starting_cash", 999.0)
+        live.set_meta("economics", {"net_worth_eur": 500.0})
+        live.close()
+        return s
+
+    @pytest.fixture()
+    def cclient(self, app_settings) -> TestClient:
+        return TestClient(create_app(app_settings))
+
+    def test_defaults_to_paper(self, cclient):
+        assert cclient.get("/api/control").json()["mode"] == "paper"
+
+    def test_switch_mode_changes_the_book_view(self, cclient):
+        assert cclient.get("/api/summary").json()["starting_cash"] == 100.0
+        cclient.post("/api/control/mode", json={"mode": "live"})
+        # Now the view serves the LIVE book.
+        assert cclient.get("/api/summary").json()["starting_cash"] == 999.0
+
+    def test_invalid_mode_rejected(self, cclient):
+        assert cclient.post("/api/control/mode", json={"mode": "x"}).status_code == 400
+
+    def test_cannot_arm_in_paper(self, cclient):
+        r = cclient.post("/api/control/arm", json={"confirm": True}).json()
+        assert r["armed"] is False
+
+    def test_arm_in_live_above_threshold(self, cclient):
+        cclient.post("/api/control/mode", json={"mode": "live"})   # live net worth 500
+        r = cclient.post("/api/control/arm", json={"confirm": True}).json()
+        assert r["armed"] is True
+        assert cclient.get("/api/control").json()["live_armed"] is True
+
+    def test_low_balance_requires_double_confirm(self, tmp_path):
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        live = Store(s.live_db_path)
+        live.set_meta("economics", {"net_worth_eur": 40.0})   # under threshold
+        live.close()
+        c = TestClient(create_app(s))
+        c.post("/api/control/mode", json={"mode": "live"})
+        single = c.post("/api/control/arm", json={"confirm": True}).json()
+        assert single["armed"] is False
+        assert single["needs_double_confirm"] is True
+        dbl = c.post("/api/control/arm",
+                     json={"confirm": True, "double_confirm": True}).json()
+        assert dbl["armed"] is True
+
+    def test_disarm(self, cclient):
+        cclient.post("/api/control/mode", json={"mode": "live"})
+        cclient.post("/api/control/arm", json={"confirm": True})
+        cclient.post("/api/control/disarm")
+        assert cclient.get("/api/control").json()["armed"] is False
+
+    def test_switch_back_to_paper_disarms(self, cclient):
+        cclient.post("/api/control/mode", json={"mode": "live"})
+        cclient.post("/api/control/arm", json={"confirm": True})
+        cclient.post("/api/control/mode", json={"mode": "paper"})
+        assert cclient.get("/api/control").json()["armed"] is False
+
+
 class TestReserveInSummary:
     def test_summary_exposes_reserve(self, tmp_path):
         s = Settings(mode="paper", budget=100.0, universe=["AAPL"],

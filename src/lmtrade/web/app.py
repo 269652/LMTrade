@@ -18,6 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..config import Settings, load_settings
+from ..core.control import LOW_BALANCE_EUR, ControlState
 from ..core.state import Store
 
 TEMPLATES = Path(__file__).parent / "templates"
@@ -47,8 +48,23 @@ class SafeJSONResponse(JSONResponse):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
-    store = Store(settings.db_path)
+    # Two books, one connection each. Which one every read serves is chosen
+    # per request by the control state's mode, so flipping the dashboard
+    # paper/live toggle swaps the whole view to the matching ledger/history.
+    _books = {
+        "paper": Store(settings.db_path),
+        "live": Store(settings.live_db_path),
+    }
     app = FastAPI(title="LMTrade", version="0.1.0")
+
+    def control() -> ControlState:
+        return ControlState.load(settings.control_path)
+
+    def store_for(mode: str) -> Store:
+        return _books["live"] if mode == "live" else _books["paper"]
+
+    def store() -> Store:
+        return store_for(control().mode)
 
     if STATIC.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
@@ -72,18 +88,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/summary")
     def summary() -> JSONResponse:
-        equity_positions = store.positions()
-        open_opts = store.open_options()
-        cash = float(store.get_meta("cash", settings.budget))
-        econ = store.get_meta("economics", {})
-        curve = store.equity_curve(limit=300)
+        equity_positions = store().positions()
+        open_opts = store().open_options()
+        cash = float(store().get_meta("cash", settings.budget))
+        econ = store().get_meta("economics", {})
+        curve = store().equity_curve(limit=300)
         equity = curve[-1]["equity"] if curve else cash
         # Show the FULL book the engine counts toward max_positions: equity
         # positions AND open options/knockouts. Options were previously
         # omitted, so an options-only book (the common case) showed "0
         # positions" even when full. For an option, qty=contracts and
         # avg_price=entry premium; the real TR ISIN is surfaced when present.
-        marks = store.get_meta("open_option_marks", {}) or {}
+        marks = store().get_meta("open_option_marks", {}) or {}
         rows = [
             {"symbol": p.symbol, "qty": round(p.qty, 6),
              "avg_price": round(p.avg_price, 4), "kind": "equity", "isin": None,
@@ -106,15 +122,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "unrealized_pnl": mark.get("unrealized_pnl") if mark else None,
             })
         return SafeJSONResponse({
-            "mode": store.get_meta("mode", settings.mode),
+            "mode": store().get_meta("mode", settings.mode),
             "currency": settings.currency,
-            "universe": store.get_meta("universe", settings.universe),
+            "universe": store().get_meta("universe", settings.universe),
             "cash": round(cash, 4),
             "equity": round(equity, 4),
-            "reserve": round(store.reserve_balance(), 4),
-            "tr_account_cash": store.get_meta("tr_account_cash"),
-            "last_realized_net_worth": store.get_meta("last_realized_net_worth"),
-            "starting_cash": store.get_meta("starting_cash", settings.budget),
+            "reserve": round(store().reserve_balance(), 4),
+            "tr_account_cash": store().get_meta("tr_account_cash"),
+            "last_realized_net_worth": store().get_meta("last_realized_net_worth"),
+            "starting_cash": store().get_meta("starting_cash", settings.budget),
             "economics": econ,
             "positions": rows,
             "num_positions": len(rows),
@@ -122,29 +138,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/trades")
     def trades(limit: int = 100) -> JSONResponse:
-        return SafeJSONResponse(store.recent_trades(limit))
+        return SafeJSONResponse(store().recent_trades(limit))
 
     @app.get("/api/activity")
     def activity(limit: int = 100) -> JSONResponse:
-        return SafeJSONResponse(store.recent_activity(limit))
+        return SafeJSONResponse(store().recent_activity(limit))
 
     @app.get("/api/logs")
     def logs(limit: int = 200) -> JSONResponse:
-        return SafeJSONResponse(store.recent_logs(limit))
+        return SafeJSONResponse(store().recent_logs(limit))
 
     @app.get("/api/equity")
     def equity() -> JSONResponse:
-        return SafeJSONResponse(store.equity_curve(limit=500))
+        return SafeJSONResponse(store().equity_curve(limit=500))
 
     @app.get("/api/costs")
     def costs() -> JSONResponse:
-        return SafeJSONResponse(store.total_costs())
+        return SafeJSONResponse(store().total_costs())
 
     @app.get("/api/realized")
     def realized(limit: int = 100) -> JSONResponse:
         """Closed options/knockouts with realized P&L, plus running totals —
         the counterpart to the open positions' unrealized P&L."""
-        closed = store.closed_options(limit)
+        closed = store().closed_options(limit)
         rows = []
         total = wins = losses = 0.0
         for o in closed:
@@ -174,13 +190,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/options")
     def options() -> JSONResponse:
         return SafeJSONResponse({
-            "open": store.open_options(),
-            "closed": store.closed_options(50),
+            "open": store().open_options(),
+            "closed": store().closed_options(50),
         })
 
     @app.get("/api/leaderboard")
     def leaderboard() -> JSONResponse:
-        genomes = store.get_meta("genomes", []) or []
+        genomes = store().get_meta("genomes", []) or []
         rows = [
             {"id": g["id"], "strategy": g["strategy"], "params": g["params"],
              "trades": g["trades"], "pnl": round(g["pnl"], 4),
@@ -193,19 +209,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/benchmark")
     def benchmark() -> JSONResponse:
         return SafeJSONResponse({
-            "curve": store.benchmark_curve(500),
-            "alpha": store.get_meta("alpha"),
-            "entry": store.get_meta("benchmark_entry"),
+            "curve": store().benchmark_curve(500),
+            "alpha": store().get_meta("alpha"),
+            "entry": store().get_meta("benchmark_entry"),
         })
 
     @app.get("/api/news")
     def news() -> JSONResponse:
-        return SafeJSONResponse(store.recent_news(50))
+        return SafeJSONResponse(store().recent_news(50))
 
     @app.get("/api/analysis")
     def analysis() -> JSONResponse:
         """The latest compiled daily market analysis (per-symbol bias)."""
-        return SafeJSONResponse(store.get_meta("market_analysis", {}) or {})
+        return SafeJSONResponse(store().get_meta("market_analysis", {}) or {})
 
     @app.get("/api/signals")
     def signals(min_confidence: float = 0.6, limit: int = 200) -> JSONResponse:
@@ -214,7 +230,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         recent decision per symbol so the tab reads as 'current strong signals'."""
         seen: set[str] = set()
         out = []
-        for a in store.recent_activity(limit):
+        for a in store().recent_activity(limit):
             if a.get("kind") != "decision":
                 continue
             d = a.get("detail") or {}
@@ -236,6 +252,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             })
         out.sort(key=lambda r: r.get("confidence", 0), reverse=True)
         return SafeJSONResponse(out)
+
+    # ------------------------------------------------------------- control plane
+    def _live_net_worth() -> float | None:
+        econ = store_for("live").get_meta("economics", {}) or {}
+        nw = econ.get("net_worth_eur")
+        if nw is not None:
+            return float(nw)
+        tr_cash = store_for("live").get_meta("tr_account_cash")
+        return float(tr_cash) if tr_cash is not None else None
+
+    @app.get("/api/control")
+    def get_control() -> JSONResponse:
+        c = control()
+        nw = _live_net_worth()
+        return SafeJSONResponse({
+            "mode": c.mode,
+            "armed": c.armed,
+            "live_armed": c.live_armed,
+            "net_worth": nw,
+            "low_balance": c.is_low_balance(nw),
+            "low_balance_threshold": LOW_BALANCE_EUR,
+        })
+
+    @app.post("/api/control/mode")
+    def set_mode(payload: dict) -> JSONResponse:
+        mode = (payload or {}).get("mode")
+        c = control()
+        try:
+            c.set_mode(mode)
+        except ValueError:
+            return SafeJSONResponse({"error": f"invalid mode {mode!r}"}, status_code=400)
+        return SafeJSONResponse({"mode": c.mode, "armed": c.armed})
+
+    @app.post("/api/control/arm")
+    def arm(payload: dict) -> JSONResponse:
+        payload = payload or {}
+        c = control()
+        nw = _live_net_worth()
+        ok = c.arm(confirm=bool(payload.get("confirm")),
+                   double_confirm=bool(payload.get("double_confirm")),
+                   net_worth=nw)
+        resp = {"armed": c.armed, "accepted": ok, "net_worth": nw,
+                "low_balance": c.is_low_balance(nw)}
+        if not ok and c.mode == "live" and c.is_low_balance(nw):
+            resp["needs_double_confirm"] = True
+        return SafeJSONResponse(resp)
+
+    @app.post("/api/control/disarm")
+    def disarm() -> JSONResponse:
+        c = control()
+        c.disarm()
+        return SafeJSONResponse({"armed": c.armed})
 
     @app.get("/healthz")
     def healthz() -> dict:

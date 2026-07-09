@@ -381,10 +381,32 @@ class Engine:
         if budget <= 0.05:
             return True   # handled (deliberately no trade), don't fall back
         contracts = budget / ko.price
-        cost = contracts * ko.price + OPTION_FEE
-        if not self.broker.adjust_cash(-cost):
-            return True
-        self.store.record_cost("fee", OPTION_FEE, "options")
+
+        # Real execution: when the broker is an ARMED live broker, place a
+        # REAL market order for the knockout certificate. Opening a long
+        # knockout (call or put variant) is always a BUY of the certificate.
+        # Real fills happen at TR; we don't touch local simulated cash (the
+        # live view's balances come from the real TR account).
+        armed_real = getattr(self.broker, "armed", False) and hasattr(
+            self.broker, "place_order")
+        if armed_real:
+            size = int(contracts)   # whole certificates (sellFractions off)
+            if size < 1:
+                self.bus.warn(
+                    f"LIVE knockout {ko.isin}: budget too small for one "
+                    f"certificate at {ko.price:.2f} — skipping.", source="engine")
+                return True
+            res = self.broker.place_order(ko.isin, "buy", float(size))
+            if not res.ok:
+                self.bus.warn(f"LIVE knockout order rejected [{ko.isin}]: "
+                              f"{res.message}", source="engine")
+                return True   # never fall back to synthetic once live-armed
+            contracts = float(size)
+        else:
+            cost = contracts * ko.price + OPTION_FEE
+            if not self.broker.adjust_cash(-cost):
+                return True
+            self.store.record_cost("fee", OPTION_FEE, "options")
         tp_premium = ko.price * (1 + cfg.take_profit_pct)
         sl_premium = ko.price * (1 - cfg.stop_loss_pct)
         # KOs are open-ended: expiry far out; the barrier is the real risk.
@@ -614,7 +636,13 @@ class Engine:
     def stop(self) -> None:
         self._stop = True
 
-    def run_forever(self, max_cycles: int | None = None) -> None:
+    def run_forever(self, max_cycles: int | None = None,
+                    rebuild_when=None) -> None:
+        """Run cycles until stopped or max_cycles. `rebuild_when()` is checked
+        after each cycle; when it returns True the loop returns so the caller
+        can rebuild the engine for a new book/broker (the paper/live toggle
+        or arm/disarm changed). Returning — not raising — keeps `finally`
+        cleanup in the CLI simple."""
         self.bus.info(
             f"Engine start | mode={self.broker.mode} | universe={self.settings.universe} | "
             f"interval={self.settings.loop.interval_seconds}s | "
@@ -630,6 +658,9 @@ class Engine:
             n += 1
             if max_cycles and n >= max_cycles:
                 self.bus.info(f"Reached max_cycles={max_cycles}, stopping.")
+                break
+            if rebuild_when is not None and rebuild_when():
+                self.bus.info("Control changed (paper/live/armed) — reconfiguring.")
                 break
             elapsed = time.time() - started
             time.sleep(max(0.0, self.settings.loop.interval_seconds - elapsed))
