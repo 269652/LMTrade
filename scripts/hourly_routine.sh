@@ -13,6 +13,7 @@ cd "$REPO_ROOT"
 
 STATE_BRANCH="bot-state"
 STATE_FILE="state/lmtrade.db"
+LEDGER_FILE="state/ledger.csv"
 # 12 cycles x ~30-symbol universe (concurrent, bounded fetch) keeps total
 # Yahoo request volume reasonable per hour — the universe grew 6x (5 -> 30
 # symbols) since this default was first set to 20; sustained high request
@@ -61,14 +62,23 @@ lmtrade run --cycles "$CYCLES" --interval "$INTERVAL"
 echo "==> Persisting state..."
 mkdir -p "$WORKTREE_DIR/state"
 cp data/lmtrade.db "$WORKTREE_DIR/$STATE_FILE"
+
+# Diffable trade ledger — reviewable via git history, unlike the opaque
+# SQLite file. Incremental: only appends trades not yet exported.
+lmtrade export-ledger "$WORKTREE_DIR/$LEDGER_FILE"
+
 (
     cd "$WORKTREE_DIR"
-    git add "$STATE_FILE"
+    git add "$STATE_FILE" "$LEDGER_FILE"
     if git diff --cached --quiet; then
         echo "==> No state changes to commit"
     else
         git -c user.name="LMTrade Bot" -c user.email="bot@lmtrade.local" \
             commit -q -m "Hourly state update: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        # Another firing may have pushed since this worktree was created from
+        # origin/$STATE_BRANCH ~20 min ago — rebase onto the latest before
+        # pushing so we never silently clobber a concurrent update.
+        git pull --rebase origin "$STATE_BRANCH"
         git push origin "$STATE_BRANCH"
         echo "==> State pushed"
     fi

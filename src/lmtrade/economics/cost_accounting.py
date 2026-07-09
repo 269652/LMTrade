@@ -38,6 +38,7 @@ class EconomicsSnapshot:
     halt_trading: bool
     pnl_eur: float
     sanity_breached: bool = False
+    reserve_eur: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -52,6 +53,7 @@ class EconomicsSnapshot:
             "halt_trading": self.halt_trading,
             "pnl_eur": round(self.pnl_eur, 4),
             "sanity_breached": self.sanity_breached,
+            "reserve_eur": round(self.reserve_eur, 4),
         }
 
 
@@ -77,16 +79,23 @@ class CostAccountant:
             self.store.record_cost("inference", usd, provider)
 
     # -- valuation ------------------------------------------------------------
-    def net_worth_eur(self, cash_eur: float, positions_value_eur: float) -> float:
-        return cash_eur + positions_value_eur
+    def net_worth_eur(
+        self, cash_eur: float, positions_value_eur: float, reserve_eur: float = 0.0
+    ) -> float:
+        # Stashed profit is still the account's money — net worth, P&L and
+        # alpha all count it — it's just excluded from tradeable cash so it
+        # can't be re-risked. See economics.profit_stash_pct.
+        return cash_eur + positions_value_eur + reserve_eur
 
-    def snapshot(self, cash_eur: float, positions_value_eur: float) -> EconomicsSnapshot:
+    def snapshot(
+        self, cash_eur: float, positions_value_eur: float, reserve_eur: float = 0.0
+    ) -> EconomicsSnapshot:
         costs = self.store.total_costs()
         inference_usd = costs.get("inference", 0.0)
         fees_eur = costs.get("fee", 0.0)
         gpu_usd = self.gpu_cost_accrued_usd()
 
-        net_eur = self.net_worth_eur(cash_eur, positions_value_eur)
+        net_eur = self.net_worth_eur(cash_eur, positions_value_eur, reserve_eur)
         net_usd = net_eur * EUR_USD
         starting = float(self.store.get_meta("starting_cash", self.settings.budget))
         pnl_eur = net_eur - starting
@@ -119,6 +128,7 @@ class CostAccountant:
             halt_trading=halt,
             pnl_eur=pnl_eur,
             sanity_breached=sanity_breached,
+            reserve_eur=reserve_eur,
         )
 
     def can_afford_inference(self, snapshot: EconomicsSnapshot, est_usd: float) -> bool:

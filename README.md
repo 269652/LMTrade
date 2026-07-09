@@ -16,13 +16,27 @@ enforced rule.
 > no real money). Live Trade Republic execution is an explicit, guarded opt-in —
 > see the honest caveats in [`docs/TRADE_REPUBLIC.md`](docs/TRADE_REPUBLIC.md).
 
+## Fork this and run your own
+
+1. **Fork the repo** on GitHub.
+2. **Open a Claude Code project** and point it at your fork.
+3. Say **"Setup the project."** Claude follows [`SETUP.md`](SETUP.md): asks
+   your configuration (budget, universe, position limits, hold times, TP/SL,
+   profit-stash ratio, GPU rate, API keys), writes secrets to a gitignored
+   `.env` and everything else to a gitignored `config.toml`, installs, runs
+   the test suite, and optionally sets up the permanent hourly Routine.
+
+Nothing you configure is committed — `.env` and `config.toml` are both
+gitignored. `.env.example` and [`config.example.toml`](config.example.toml)
+document every available setting.
+
 ---
 
 ## What's in the box
 
 | Layer | Module | What it does |
 |-------|--------|--------------|
-| **CLI** | `lmtrade.cli` | `run`, `backtest`, `web`, `viz`, `status`, `analyze`, `deploy`, `reset`, `config` |
+| **CLI** | `lmtrade.cli` | `run`, `backtest`, `web`, `viz`, `status`, `analyze`, `deploy`, `reset`, `config`, `import-news`, `import-analysis`, `export-ledger` |
 | **Backtest** | `backtest.walk_forward` | Walk-forward folds over historical bars; pre-trains the genome population |
 | **Web dashboard** | `lmtrade.web` | Portfolio, economics, trades, options, leaderboard, benchmark, news, logs |
 | **Inline viz** | `lmtrade.viz` | Notebook-native matplotlib dashboard (Colab/Jupyter) + `lmtrade viz` PNG |
@@ -106,13 +120,59 @@ idles out, so an always-on self-funding bot belongs on the Vast.ai path.
 
 ## Configuration
 
-Defaults live in [`config/default.yaml`](config/default.yaml); every value can be
-overridden by environment variables (see [`.env.example`](.env.example)). Key knobs:
+Three layers, highest wins: **environment variables** (`LMTRADE_*`, see
+[`.env.example`](.env.example)) > **`config.toml`** (gitignored, per-fork
+overrides — copy from [`config.example.toml`](config.example.toml)) >
+**[`config/default.yaml`](config/default.yaml)** (committed baseline).
+
+If you forked this repo, say **"Setup the project"** in a Claude Code session
+pointed at it — see [`SETUP.md`](SETUP.md) for the guided flow, which asks
+your settings and writes both files for you. Manually, `config.toml` takes any
+key from `config/default.yaml`, e.g.:
+
+```toml
+budget = 250.0
+[options]
+take_profit_pct = 0.4
+min_hold_hours = 2.0        # don't exit before a position has been open 2h
+[economics]
+profit_stash_pct = 0.5      # stash 50% of every winning trade's profit —
+                            # protected from being re-risked, still counted
+                            # in net worth/alpha
+[loop]
+max_new_positions_per_cycle = 2   # cap new trades per cycle
+```
+
+Env-var equivalents for the most common knobs:
 
 - `LMTRADE_MODE` — `paper` (default) or `live`
-- `LMTRADE_BUDGET` — starting cash (default 10)
+- `LMTRADE_BUDGET` — starting cash (default 100)
 - `LMTRADE_MODEL_STACK` — e.g. `heuristic,slm,perplexity`
 - `LMTRADE_GPU_USD_PER_HOUR` / `LMTRADE_MIN_RUNWAY_HOURS` — the economics floor
+
+`lmtrade config` prints the fully resolved settings so you can check what
+actually took effect across all three layers.
+
+## Running permanently (hourly Claude Routine)
+
+Claude Code sessions run in ephemeral containers, so a background `lmtrade
+run` process doesn't survive indefinitely. The alternative used here: a
+Claude Routine fires every hour (the minimum interval Routines support),
+gathers market news, compiles a daily analysis (baked in as a fusion signal
+via `lmtrade import-news` / `lmtrade import-analysis`), runs a batch of
+trading cycles, and persists state — see [`SETUP.md`](SETUP.md) step 4 to set
+this up on a fork, or `scripts/hourly_routine.sh` for the mechanics.
+
+State lives on a dedicated **`bot-state`** branch (not the code branch, to
+keep hourly commits out of your PR history):
+
+- `state/lmtrade.db` — the SQLite state the engine reads/writes.
+- `state/ledger.csv` — every trade, incrementally appended each run. Unlike
+  the SQLite file, this is diffable — review trade history directly via
+  `git log`/`git diff` on the `bot-state` branch, no query needed.
+
+The script pulls with `--rebase` before pushing, so two overlapping firings
+can't silently clobber each other's state.
 
 ## Deploying to a Vast.ai GPU
 

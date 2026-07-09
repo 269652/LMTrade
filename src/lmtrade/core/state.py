@@ -221,6 +221,21 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def trades_since(self, last_id: int) -> list[dict]:
+        """Trades with id > last_id, ascending — for incremental ledger export."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM trades WHERE id > ? ORDER BY id ASC", (last_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- reserve (profit stash) ------------------------------------------------
+    def add_reserve(self, amount: float) -> None:
+        self.set_meta("reserve_eur", self.reserve_balance() + amount)
+
+    def reserve_balance(self) -> float:
+        return float(self.get_meta("reserve_eur", 0.0))
+
     # -- positions ------------------------------------------------------------
     def upsert_position(self, pos: Position) -> None:
         with self._lock:

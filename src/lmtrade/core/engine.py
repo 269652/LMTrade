@@ -147,6 +147,7 @@ class Engine:
             entry = max(1e-9, o["entry_premium"])
             change = (mark - entry) / entry
             hours_left = (o["expiry_ts"] - self.now()) / 3600.0
+            hours_held = (self.now() - o["opened_ts"]) / 3600.0
             # Every position carries explicit TP/SL levels set at open time —
             # those govern. Config-derived thresholds are only a fallback for
             # legacy rows persisted before stops were stored per-position.
@@ -154,13 +155,19 @@ class Engine:
             sl = o.get("sl_premium")
             if sl is None:
                 sl = entry * (1 - cfg.stop_loss_pct)
+
+            expiry_hit = hours_left <= cfg.min_hours_to_expiry
+            held_long_enough = hours_held >= cfg.min_hold_hours
             reason = None
-            if mark >= tp:
-                reason = f"take-profit hit (mark {mark:.3f} >= TP {tp:.3f}, {change:+.0%})"
-            elif mark <= sl:
-                reason = f"stop-loss hit (mark {mark:.3f} <= SL {sl:.3f}, {change:+.0%})"
-            elif hours_left <= cfg.min_hours_to_expiry:
+            if expiry_hit:
+                # A hard constraint of the option itself — overrides min_hold.
                 reason = f"expiry window ({hours_left:.1f}h left)"
+            elif cfg.max_hold_hours > 0 and hours_held >= cfg.max_hold_hours:
+                reason = f"max hold time reached ({hours_held:.1f}h)"
+            elif held_long_enough and mark >= tp:
+                reason = f"take-profit hit (mark {mark:.3f} >= TP {tp:.3f}, {change:+.0%})"
+            elif held_long_enough and mark <= sl:
+                reason = f"stop-loss hit (mark {mark:.3f} <= SL {sl:.3f}, {change:+.0%})"
             if reason is None:
                 continue
             proceeds = mark * o["contracts"] - OPTION_FEE
@@ -168,6 +175,16 @@ class Engine:
             self.broker.adjust_cash(max(0.0, proceeds))
             self.store.record_cost("fee", OPTION_FEE, "options")
             self.store.close_option(o["id"], mark, pnl)
+
+            # Profit stash: a configured fraction of realized PROFIT (never
+            # losses) is moved out of tradeable cash into a reserve. Still
+            # counted in net worth/alpha — just protected from being re-risked.
+            stash_pct = self.settings.economics.profit_stash_pct
+            if pnl > 0 and stash_pct > 0:
+                stash = pnl * stash_pct
+                if self.broker.adjust_cash(-stash):
+                    self.store.add_reserve(stash)
+
             self.store.record_trade(Trade(
                 o["underlying"], "sell", o["contracts"], mark, OPTION_FEE,
                 self.broker.mode, f"close {o['kind']} — {reason}", None))
@@ -341,7 +358,7 @@ class Engine:
 
         cash = self.broker.cash()
         total_value = self._positions_value(prices) + self._options_value(prices)
-        econ = self.accountant.snapshot(cash, total_value)
+        econ = self.accountant.snapshot(cash, total_value, self.store.reserve_balance())
         self.store.set_meta("economics", econ.as_dict())
         self._update_benchmark(prices)
         self.bus.activity(
@@ -390,7 +407,11 @@ class Engine:
             # across the whole universe, not just whichever symbols happened
             # to come first in the list.
             candidates.sort(key=lambda c: c[0].confidence, reverse=True)
-            for decision, genome_id in candidates[:max(0, slots)]:
+            take = max(0, slots)
+            cap = self.settings.loop.max_new_positions_per_cycle
+            if cap > 0:
+                take = min(take, cap)
+            for decision, genome_id in candidates[:take]:
                 quote = quotes[decision.symbol]
                 if self.settings.options.enabled:
                     self._enter_option(quote, decision, genome_id)

@@ -1,0 +1,73 @@
+# LMTrade per-fork configuration.
+#
+# Copy this file to config.toml (gitignored — never committed) to override
+# any non-secret setting from config/default.yaml without touching a tracked
+# file. Only include the keys you want to change; anything omitted keeps its
+# default. Secrets (API keys, Trade Republic credentials) go in .env instead
+# — see .env.example.
+#
+# Precedence: environment variables (LMTRADE_*) > config.toml >
+# config/default.yaml > built-in defaults.
+#
+# `lmtrade config` prints the fully resolved settings so you can check what
+# actually took effect.
+
+mode = "paper"              # paper | live (see docs/TRADE_REPUBLIC.md before "live")
+budget = 100.0               # starting cash, account currency
+currency = "EUR"
+
+universe = [                 # instruments to trade — see config/default.yaml
+  "AAPL", "MSFT", "SPY", "BTC-USD", "ETH-USD",
+]
+
+[loop]
+interval_seconds = 15        # seconds between trading cycles within a run
+max_positions = 8            # cap on concurrent open positions
+max_new_positions_per_cycle = 0   # cap NEW entries per cycle ("trades per
+                                  # hour" = this x cycles-per-hourly-run;
+                                  # 0 = no extra cap, fill up to max_positions)
+
+[options]                    # synthetic options layer (paper trading)
+enabled = true
+expiry_days = 7.0
+max_option_fraction = 0.15   # max fraction of equity risked in one position
+take_profit_pct = 0.5        # +50% premium -> close for a win
+stop_loss_pct = 0.4          # -40% premium -> cut the loss
+min_hours_to_expiry = 24.0   # force-close inside this window of expiry
+min_hold_hours = 0.0         # block TP/SL exits before this many hours have
+                             # passed (0 = no minimum hold time)
+max_hold_hours = 0.0         # force-close after this many hours regardless
+                             # of TP/SL (0 = disabled, relies on expiry_days)
+
+[risk]
+stop_loss_pct = 0.05
+take_profit_pct = 0.08
+min_confidence = 0.55        # fused signal confidence required to act
+
+[economics]
+gpu_usd_per_hour = 0.20      # your GPU host's hourly rate (0 if not renting one)
+min_runway_hours = 6.0       # halt trading below this many hours of runway
+sanity_max_multiple = 20.0   # circuit breaker: halt if net worth ever implies
+                             # more than this multiple of the starting budget
+profit_stash_pct = 0.0       # fraction of realized PROFIT (never losses) on
+                             # each winning close moved into a reserve
+                             # excluded from future trades. 0.5 = 50/50
+                             # reinvest/stash, 0.7 = stash 70%. The reserve
+                             # still counts toward net worth/alpha — it's
+                             # just protected from being re-risked.
+
+[learning]
+enabled = true
+population = 8
+epsilon = 0.2                # exploration rate for the strategy optimizer
+
+[benchmark]
+symbol = "SPY"                # "retail baseline" the bot is measured against
+
+[data]
+provider = "auto"             # auto | yahoo | synthetic
+intraday = true
+
+[research]
+news_interval_minutes = 60
+daily_analysis_interval_hours = 24

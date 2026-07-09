@@ -94,12 +94,13 @@ def status():
     # premiums-at-risk in net worth without needing a live market snapshot.
     pos_value += sum(o["contracts"] * o["entry_premium"] for o in store.open_options())
     accountant = CostAccountant(settings, store)
-    econ = accountant.snapshot(cash, pos_value)
+    econ = accountant.snapshot(cash, pos_value, store.reserve_balance())
 
     t = Table(title="Portfolio", show_header=True, header_style="bold")
     t.add_column("Metric"); t.add_column("Value", justify="right")
     t.add_row("Mode", store.get_meta("mode", settings.mode))
-    t.add_row("Cash", f"{cash:.2f} {settings.currency}")
+    t.add_row("Cash (tradeable)", f"{cash:.2f} {settings.currency}")
+    t.add_row("Reserve (stashed)", f"{econ.reserve_eur:.2f} {settings.currency}")
     t.add_row("Net worth", f"{econ.net_worth_eur:.2f} {settings.currency}")
     t.add_row("P&L", f"{econ.pnl_eur:+.2f} {settings.currency}")
     t.add_row("Open positions", str(len(positions)))
@@ -252,6 +253,44 @@ def import_analysis(
     store.close()
     console.print(f"[green]Analysis imported for {len(cleaned)} symbols "
                   f"(valid {data.get('valid_hours', 24)}h).[/green]")
+
+
+@app.command("export-ledger")
+def export_ledger(
+    file: str = typer.Argument(..., help="CSV path to append to (created if missing)."),
+):
+    """Incrementally export new trades to a diffable CSV — meant to be
+    committed alongside the DB (e.g. on the bot-state branch) so trade
+    history is reviewable via git, not just by querying the opaque SQLite
+    file. Safe to call every run: only appends rows not yet exported."""
+    import csv as csv_module
+
+    settings = load_settings()
+    store = Store(settings.db_path)
+    marker_key = "ledger_last_exported_id"
+    last_id = int(store.get_meta(marker_key, 0))
+    rows = store.trades_since(last_id)
+
+    if not rows:
+        store.close()
+        console.print("[dim]No new trades to export.[/dim]")
+        return
+
+    path = Path(file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["id", "ts", "symbol", "side", "qty", "price", "fee",
+                  "mode", "reason", "confidence"]
+    write_header = not path.exists()
+    with path.open("a", newline="") as f:
+        writer = csv_module.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r.get(k) for k in fieldnames})
+
+    store.set_meta(marker_key, rows[-1]["id"])
+    store.close()
+    console.print(f"[green]Exported {len(rows)} new trade(s) to {path}.[/green]")
 
 
 @app.command()

@@ -14,6 +14,10 @@ env/
 *.env
 !.env.example
 
+# Per-fork user config (see config.example.toml) — non-secret settings that
+# override config/default.yaml without touching a tracked file.
+/config.toml
+
 # Runtime state (anchored to repo root so they don't shadow the
 # src/lmtrade/data source package or any other same-named dir)
 /data/
