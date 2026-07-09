@@ -95,6 +95,21 @@ class HeuristicProvider(ModelProvider):
                 score -= 0.3
                 reasons.append(f"RSI {rsi:.0f} overbought")
 
+        # Multi-timeframe trend confirmation (time-series momentum:
+        # Moskowitz-Ooi-Pedersen 2012; Faber 2007): halve conviction when the
+        # short-term signal fights the medium-term trend. A haircut, not a
+        # veto — a strong mean-reversion setup can still act, but marginal
+        # counter-trend trades (the ones whose edge can't clear the flat
+        # ~1 EUR fee) are suppressed. Deliberately no boost when aligned:
+        # asymmetric dampening is robust, symmetric boosting overfits.
+        mtrend = ind.get("trend")
+        if mtrend == "down" and score > 0:
+            score *= 0.5
+            reasons.append("counter-trend (medium trend down): conviction halved")
+        elif mtrend == "up" and score < 0:
+            score *= 0.5
+            reasons.append("counter-trend (medium trend up): conviction halved")
+
         direction = "buy" if score > 0.15 else "sell" if score < -0.15 else "hold"
         return Signal(self.name, direction, min(1.0, abs(score) + 0.4),
                       "; ".join(reasons), 0.0)

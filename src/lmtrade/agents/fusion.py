@@ -77,6 +77,15 @@ class FusionEngine:
         # dilute the conviction of the providers that did take a side, otherwise
         # every unavailable provider (no key/host) would drag the decision toward
         # inaction. Only directional signals contribute to the denominator.
+        #
+        # Normalize by Σw (weights only), NOT Σ w·confidence: dividing by the
+        # confidence-weighted sum cancelled each voter's conviction — a lone
+        # directional voter always netted ±1.0 and every decision printed
+        # conf 1.00 (observed live), saturating every downstream confidence
+        # gate (min_confidence, storm extra-conviction, confidence sizing,
+        # slot ranking). With Σw, net is the weighted MEAN signed conviction:
+        # a lone 0.6-confident voter nets ±0.6; agreement averages; conflict
+        # cancels.
         num = 0.0
         den = 0.0
         for s in signals:
@@ -84,7 +93,7 @@ class FusionEngine:
                 continue
             w = self.weights.get(s.provider, 1.0)
             num += w * s.signed()
-            den += w * max(1e-6, s.confidence)
+            den += w
         net = num / den if den else 0.0        # -1..1
 
         direction = "buy" if net > 0.1 else "sell" if net < -0.1 else "hold"

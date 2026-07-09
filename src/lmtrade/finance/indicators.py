@@ -62,6 +62,22 @@ def macd(
     return float(macd_line), float(signal_line), float(hist)
 
 
+def trend(prices: list[float] | np.ndarray, window: int = 50) -> str | None:
+    """Medium-term trend: 'up' when the last price is above its SMA(window),
+    'down' when below, None on insufficient history. The classic SMA timing
+    filter (Faber 2007) / time-series-momentum sign (Moskowitz-Ooi-Pedersen
+    2012): the sign of medium-term drift is one of the most replicated
+    return predictors, used here to confirm — never to generate — entries."""
+    arr = _as_array(prices)
+    mid = sma(arr, window)
+    if mid is None or not len(arr):
+        return None
+    last = float(arr[-1])
+    if last == mid:
+        return None   # dead flat: no information, treat as unknown
+    return "up" if last > mid else "down"
+
+
 def volatility(prices: list[float] | np.ndarray, window: int = 20) -> float | None:
     arr = _as_array(prices)
     if len(arr) < window + 1:
@@ -78,4 +94,5 @@ def indicator_snapshot(prices: list[float] | np.ndarray) -> dict[str, float | No
         "sma_slow": sma(prices, 30),
         "rsi": rsi(prices, 14),
         "vol": volatility(prices, 20),
+        "trend": trend(prices, 50),
     }
