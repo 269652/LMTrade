@@ -113,6 +113,32 @@ class LearningConfig(BaseModel):
     evolve_every_trades: int = 10      # run evolution after N closed trades
 
 
+class TRConfig(BaseModel):
+    # Use real Trade Republic knockout certificates (real ISINs) for paper
+    # trading when TR credentials are configured. Strictly optional: without
+    # TR_PHONE/TR_PIN in the environment this is inert and the synthetic
+    # options layer is used. Login is via pytr (unofficial, against TR ToS —
+    # see docs/TRADE_REPUBLIC.md).
+    use_derivatives: bool = True
+    target_leverage: float = 5.0    # preferred KO leverage when selecting
+
+
+class SizingConfig(BaseModel):
+    # Fractional Kelly from each genome's empirical win/loss record. Full
+    # Kelly is notoriously too aggressive for estimated edges — 0.5 ("half
+    # Kelly") is the standard practitioner compromise.
+    kelly_enabled: bool = True
+    kelly_fraction_of_full: float = 0.5
+    kelly_min_trades: int = 5       # fall back to confidence sizing below this
+    # Volatility targeting: scale size down when realized vol exceeds target.
+    vol_target_annual: float = 0.20
+    # Regime filter: in a vol-spike ("storm") regime demand extra conviction
+    # and halve size — measured edges break first when volatility regimes flip.
+    regime_filter_enabled: bool = True
+    storm_extra_confidence: float = 0.10
+    storm_size_factor: float = 0.5
+
+
 class BenchmarkConfig(BaseModel):
     symbol: str = "SPY"                # "retail baseline": buy-and-hold SPY
 
@@ -140,6 +166,8 @@ class Settings(BaseModel):
     options: OptionsConfig = OptionsConfig()
     learning: LearningConfig = LearningConfig()
     benchmark: BenchmarkConfig = BenchmarkConfig()
+    tr: TRConfig = TRConfig()
+    sizing: SizingConfig = SizingConfig()
     web: WebConfig = WebConfig()
     data: DataConfig = DataConfig()
 

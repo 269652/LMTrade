@@ -29,6 +29,12 @@ class Genome:
     params: dict
     trades: int = 0
     pnl: float = 0.0
+    # Win/loss breakdown for Kelly sizing (defaults keep genomes persisted
+    # before these fields existed loading cleanly).
+    wins: int = 0
+    losses: int = 0
+    win_sum: float = 0.0     # sum of winning P&Ls (positive)
+    loss_sum: float = 0.0    # sum of |losing P&Ls| (positive)
 
     @property
     def fitness(self) -> float:
@@ -37,6 +43,19 @@ class Genome:
         if self.trades == 0:
             return 0.01
         return self.pnl / self.trades
+
+    @property
+    def win_rate(self) -> float:
+        settled = self.wins + self.losses
+        return self.wins / settled if settled else 0.0
+
+    @property
+    def avg_win(self) -> float:
+        return self.win_sum / self.wins if self.wins else 0.0
+
+    @property
+    def avg_loss(self) -> float:
+        return self.loss_sum / self.losses if self.losses else 0.0
 
     def signal(self, history: list[float]) -> tuple[str, float]:
         return signal_for(self.strategy, history, self.params)
@@ -100,6 +119,12 @@ class StrategyOptimizer:
             if g.id == genome_id:
                 g.trades += 1
                 g.pnl += pnl
+                if pnl > 0:
+                    g.wins += 1
+                    g.win_sum += pnl
+                elif pnl < 0:
+                    g.losses += 1
+                    g.loss_sum += -pnl
                 break
         self._save(genomes)
 

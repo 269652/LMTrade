@@ -64,6 +64,22 @@ epsilon = 0.2                # exploration rate for the strategy optimizer
 [benchmark]
 symbol = "SPY"                # "retail baseline" the bot is measured against
 
+[tr]                          # real-TR-instrument paper trading (optional)
+use_derivatives = true        # inert unless TR_PHONE/TR_PIN are set in .env;
+                              # with credentials, paper trades use REAL TR
+                              # knockout certificates (real ISINs, barrier
+                              # pricing) instead of synthetic options
+target_leverage = 5.0         # preferred knockout leverage (clamped 2-20)
+
+[sizing]                      # quantitative sizing layer
+kelly_enabled = true          # fractional Kelly from each strategy's edge
+kelly_fraction_of_full = 0.5  # half-Kelly (full Kelly over-bets estimated edges)
+kelly_min_trades = 5          # confidence sizing until enough trade history
+vol_target_annual = 0.20      # shrink size when realized vol exceeds this
+regime_filter_enabled = true  # vol-spike regime: +0.10 conviction, half size
+storm_extra_confidence = 0.10
+storm_size_factor = 0.5
+
 [data]
 provider = "auto"             # auto | yahoo | synthetic
 intraday = true

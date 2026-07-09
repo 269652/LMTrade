@@ -24,8 +24,14 @@ from ..brokers.base import Broker
 from ..config import Settings
 from ..data.market import MarketData, Quote
 from ..economics.cost_accounting import CostAccountant
+from ..finance.knockouts import (
+    is_knocked_out,
+    knockout_price,
+    strike_after_financing,
+)
 from ..finance.options import mark_option, synth_option
 from ..finance.risk import should_exit, size_position
+from ..finance.sizing import kelly_fraction, regime, vol_scale
 from ..models.base import Signal
 from ..models.providers import build_providers
 from ..research.daily import DailyAnalyst
@@ -44,6 +50,7 @@ class Engine:
     def __init__(
         self, settings: Settings, store: Store, broker: Broker,
         news_fetcher=None, analysis_caller=None, market=None,
+        tr_derivatives="auto",
         now: Callable[[], float] = time.time,
     ):
         self.settings = settings
@@ -53,6 +60,14 @@ class Engine:
         self.bus = EventBus(store)
         self.market = market or MarketData(settings.data.provider,
                                            intraday=settings.data.intraday)
+        if tr_derivatives == "auto":
+            # Auto-build from settings + env; returns None without TR creds,
+            # keeping TR login strictly optional. Pass tr_derivatives=None
+            # explicitly to force the synthetic-options path.
+            from ..brokers.tr_derivatives import build_tr_derivatives
+
+            tr_derivatives = build_tr_derivatives(settings)
+        self.tr_derivatives = tr_derivatives
         self._last_good_price: dict[str, float] = {}
         self.fusion = FusionEngine(settings, build_providers(settings))
         self.accountant = CostAccountant(settings, store)
@@ -90,14 +105,23 @@ class Engine:
             total += pos.qty * prices.get(pos.symbol, pos.avg_price)
         return total
 
+    def _mark_position(self, o: dict, spot: float) -> float:
+        """Current per-unit mark for an open position, by instrument type."""
+        if (o.get("instrument_type") or "option") == "knockout":
+            if is_knocked_out(spot, o["barrier"], o["kind"]):
+                return 0.0
+            days_held = max(0.0, (self.now() - o["opened_ts"]) / 86400.0)
+            eff_strike = strike_after_financing(o["strike"], o["kind"], days_held)
+            return knockout_price(spot, eff_strike, o["ratio"] or 1.0, o["kind"])
+        return mark_option(spot, o["strike"], o["expiry_ts"], o["iv"], o["kind"])
+
     def _options_value(self, prices: dict[str, float]) -> float:
         total = 0.0
         for o in self.store.open_options():
             spot = prices.get(o["underlying"])
             if spot is None:
                 continue
-            total += o["contracts"] * mark_option(
-                spot, o["strike"], o["expiry_ts"], o["iv"], o["kind"])
+            total += o["contracts"] * self._mark_position(o, spot)
         return total
 
     # ------------------------------------------------------------ research jobs
@@ -143,7 +167,8 @@ class Engine:
             spot = prices.get(underlying)
             if spot is None:
                 continue
-            mark = mark_option(spot, o["strike"], o["expiry_ts"], o["iv"], o["kind"])
+            is_ko = (o.get("instrument_type") or "option") == "knockout"
+            mark = self._mark_position(o, spot)
             entry = max(1e-9, o["entry_premium"])
             change = (mark - entry) / entry
             hours_left = (o["expiry_ts"] - self.now()) / 3600.0
@@ -159,7 +184,14 @@ class Engine:
             expiry_hit = hours_left <= cfg.min_hours_to_expiry
             held_long_enough = hours_held >= cfg.min_hold_hours
             reason = None
-            if expiry_hit:
+            if is_ko and is_knocked_out(spot, o["barrier"], o["kind"]):
+                # A knockout is an involuntary event: the certificate IS dead
+                # the moment the barrier is touched — overrides every gate.
+                mark = 0.0
+                change = -1.0
+                reason = (f"KNOCKED OUT (spot {spot:.2f} touched barrier "
+                          f"{o['barrier']:.2f}) — total loss of premium")
+            elif expiry_hit:
                 # A hard constraint of the option itself — overrides min_hold.
                 reason = f"expiry window ({hours_left:.1f}h left)"
             elif cfg.max_hold_hours > 0 and hours_held >= cfg.max_hold_hours:
@@ -243,16 +275,88 @@ class Engine:
         self.accountant.record_inference("fusion", decision.inference_cost)
         return decision, genome_id
 
+    def _genome_stats(self, genome_id: str | None):
+        if not (self.optimizer and genome_id):
+            return None
+        for g in self.optimizer.genomes():
+            if g.id == genome_id:
+                return g
+        return None
+
+    def _position_budget(self, quote: Quote, decision: Decision,
+                         genome_id: str | None) -> float:
+        """Premium budget for a new position, layering the quant sizing rules:
+        fractional Kelly from the genome's empirical edge (when proven),
+        volatility targeting, and the storm-regime haircut. Falls back to the
+        plain confidence-scaled fraction when there isn't enough data."""
+        cfg = self.settings.options
+        s = self.settings.sizing
+        cash = self.broker.cash()
+        equity = cash + self._positions_value({quote.symbol: quote.price}) \
+            + self._options_value({quote.symbol: quote.price})
+
+        fraction = cfg.max_option_fraction * decision.confidence
+        g = self._genome_stats(genome_id)
+        if (s.kelly_enabled and g is not None
+                and (g.wins + g.losses) >= s.kelly_min_trades):
+            kf = kelly_fraction(g.win_rate, g.avg_win, g.avg_loss) \
+                * s.kelly_fraction_of_full
+            fraction = min(cfg.max_option_fraction, kf)
+        fraction *= vol_scale(quote.history, s.vol_target_annual)
+        if s.regime_filter_enabled and regime(quote.history) == "storm":
+            fraction *= s.storm_size_factor
+        return min(fraction * equity, cash - OPTION_FEE)
+
+    def _enter_knockout(self, quote: Quote, decision: Decision,
+                        genome_id: str | None) -> bool:
+        """Open a real-ISIN TR knockout (paper fill). Returns False when no
+        TR client / no suitable instrument — caller falls back to options."""
+        tr = self.tr_derivatives
+        if tr is None or not tr.available():
+            return False
+        ko = tr.find_knockout(quote.symbol, decision.direction, quote.price,
+                              self.settings.tr.target_leverage)
+        if ko is None or ko.price <= 0:
+            return False
+        cfg = self.settings.options
+        budget = self._position_budget(quote, decision, genome_id)
+        if budget <= 0.05:
+            return True   # handled (deliberately no trade), don't fall back
+        contracts = budget / ko.price
+        cost = contracts * ko.price + OPTION_FEE
+        if not self.broker.adjust_cash(-cost):
+            return True
+        self.store.record_cost("fee", OPTION_FEE, "options")
+        tp_premium = ko.price * (1 + cfg.take_profit_pct)
+        sl_premium = ko.price * (1 - cfg.stop_loss_pct)
+        # KOs are open-ended: expiry far out; the barrier is the real risk.
+        expiry_ts = self.now() + 365 * 86400.0
+        self.store.open_option(
+            quote.symbol, ko.kind, ko.strike, expiry_ts, 0.0, contracts,
+            ko.price, genome_id, tp_premium=tp_premium, sl_premium=sl_premium,
+            instrument_type="knockout", barrier=ko.barrier, ratio=ko.ratio,
+            isin=ko.isin)
+        self.store.record_trade(Trade(
+            quote.symbol, "buy", contracts, ko.price, OPTION_FEE,
+            self.broker.mode,
+            f"open {ko.kind} {ko.isin or 'synthetic'} K={ko.strike} "
+            f"barrier={ko.barrier} {ko.leverage:.1f}x — {decision.rationale}",
+            decision.confidence))
+        self.bus.activity(
+            "trade",
+            f"OPEN {ko.kind.upper()} {quote.symbol} [{ko.isin or 'synthetic'}] "
+            f"K={ko.strike} barrier={ko.barrier} {ko.leverage:.1f}x "
+            f"×{contracts:.3f} @ {ko.price:.3f}",
+            quote.symbol, {"genome": genome_id, "isin": ko.isin,
+                           "leverage": ko.leverage})
+        return True
+
     def _enter_option(self, quote: Quote, decision: Decision, genome_id: str | None) -> None:
         cfg = self.settings.options
         kind = "call" if decision.direction == "buy" else "put"
         oq = synth_option(quote.symbol, quote.price, quote.history, kind,
                           expiry_days=cfg.expiry_days)
-        cash = self.broker.cash()
-        equity = cash + self._positions_value({quote.symbol: quote.price}) \
-            + self._options_value({quote.symbol: quote.price})
-        budget = min(cfg.max_option_fraction * equity * decision.confidence,
-                     cash - OPTION_FEE)
+        budget = self._position_budget(quote, decision, genome_id)
         if budget <= 0.05:
             return
         contracts = budget / oq.premium
@@ -398,8 +502,13 @@ class Engine:
                     "decision",
                     f"{symbol}: {decision.direction.upper()} conf {decision.confidence:.2f}",
                     symbol, decision.as_dict())
-                if decision.direction == "hold" or \
-                        decision.confidence < self.settings.risk.min_confidence:
+                # Storm regime: demand extra conviction — measured edges are
+                # the first casualty when the volatility regime flips.
+                min_conf = self.settings.risk.min_confidence
+                if (self.settings.sizing.regime_filter_enabled
+                        and regime(quotes[symbol].history) == "storm"):
+                    min_conf += self.settings.sizing.storm_extra_confidence
+                if decision.direction == "hold" or decision.confidence < min_conf:
                     continue
                 candidates.append((decision, genome_id))
 
@@ -414,7 +523,11 @@ class Engine:
             for decision, genome_id in candidates[:take]:
                 quote = quotes[decision.symbol]
                 if self.settings.options.enabled:
-                    self._enter_option(quote, decision, genome_id)
+                    # Prefer real TR knockout instruments when the (optional)
+                    # TR client is authenticated; fall back to synthetic
+                    # Black-Scholes options otherwise — unchanged behavior.
+                    if not self._enter_knockout(quote, decision, genome_id):
+                        self._enter_option(quote, decision, genome_id)
                 else:
                     self._enter_equity(quote, decision, econ)
 

@@ -77,14 +77,19 @@ single call where the AskUserQuestion tool allows multiple questions at once.
       need this if they're using the hourly Routine).
     - `VAST_API_KEY` — only if deploying to a Vast.ai GPU box.
     - Ollama host / SLM model — only if running a local SLM.
-11. **Trade Republic credentials** — only ask if the user chose `live` mode
-    in question 1. Trade Republic has **no API key** — the unofficial
-    adapter uses phone number + app PIN (same as the mobile app). Get
-    `TR_PHONE` and `TR_PIN`. Reiterate clearly: this is against TR's ToS,
-    can get the account locked, and live order placement is disabled by a
-    deliberate code guard (`brokers/trade_republic.py`) that the user must
-    remove themselves after reading and accepting the risk — do not offer
-    to remove that guard as part of setup.
+11. **Trade Republic credentials** — ask in two cases. (a) The user chose
+    `live` mode in question 1, or (b) the user wants **paper trading on
+    real TR instruments** (`tr.use_derivatives`): with `TR_PHONE`/`TR_PIN`
+    set, the bot selects real TR knockout certificates (real ISINs, barrier
+    pricing) for its simulated trades instead of synthetic options — no
+    orders are ever placed. Trade Republic has **no API key** — the
+    unofficial adapter uses phone number + app PIN (same as the mobile
+    app), first pairing needs one interactive 2FA (`pytr login`), TR's API
+    is websocket-based (blocked by some proxies), and it's against TR's
+    ToS either way. For live mode, reiterate clearly: order placement is
+    disabled by a deliberate code guard (`brokers/trade_republic.py`) that
+    the user must remove themselves after reading and accepting the risk —
+    do not offer to remove that guard as part of setup.
 
 ## Step 2 — Write the config files
 

@@ -107,6 +107,23 @@ research:
 benchmark:
   symbol: SPY              # "retail baseline": buy-and-hold SPY
 
+tr:                        # optional real-TR-instrument paper trading
+  use_derivatives: true    # inert without TR_PHONE/TR_PIN in the env; when
+                           # credentials are present, paper trading selects
+                           # REAL TR knockout certificates (real ISINs) and
+                           # marks them with the barrier-product model in
+                           # finance/knockouts.py instead of synthetic options
+  target_leverage: 5.0     # preferred KO leverage when picking an instrument
+
+sizing:                    # quantitative sizing layer (public methods, no magic)
+  kelly_enabled: true      # fractional Kelly from each genome's empirical edge
+  kelly_fraction_of_full: 0.5   # half-Kelly: the practitioner standard
+  kelly_min_trades: 5      # confidence sizing until a genome has this many
+  vol_target_annual: 0.20  # volatility targeting: shrink size above this
+  regime_filter_enabled: true   # vol-spike regime -> extra conviction, half size
+  storm_extra_confidence: 0.10
+  storm_size_factor: 0.5
+
 economics:
   gpu_usd_per_hour: 0.20       # Vast.ai hourly burn (T4 ~0.15-0.25, A100 ~0.6-1.1)
   min_runway_hours: 6

@@ -81,7 +81,11 @@ CREATE TABLE IF NOT EXISTS option_positions (
     closed_ts     REAL,
     pnl           REAL,
     tp_premium    REAL,               -- explicit take-profit level, set at open
-    sl_premium    REAL                -- explicit stop-loss level, set at open
+    sl_premium    REAL,               -- explicit stop-loss level, set at open
+    instrument_type TEXT DEFAULT 'option',  -- option | knockout
+    barrier       REAL,               -- KO barrier (knockouts only)
+    ratio         REAL,               -- KO subscription ratio (knockouts only)
+    isin          TEXT                -- real TR instrument ISIN when available
 );
 CREATE TABLE IF NOT EXISTS news (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,10 +142,13 @@ class Store:
         the persisted bot-state DB outlives code changes)."""
         cols = {r["name"] for r in
                 self._conn.execute("PRAGMA table_info(option_positions)")}
-        for col in ("tp_premium", "sl_premium"):
+        for col, decl in (("tp_premium", "REAL"), ("sl_premium", "REAL"),
+                          ("instrument_type", "TEXT DEFAULT 'option'"),
+                          ("barrier", "REAL"), ("ratio", "REAL"),
+                          ("isin", "TEXT")):
             if col not in cols:
                 self._conn.execute(
-                    f"ALTER TABLE option_positions ADD COLUMN {col} REAL")
+                    f"ALTER TABLE option_positions ADD COLUMN {col} {decl}")
 
     # -- meta -----------------------------------------------------------------
     def set_meta(self, key: str, value: Any) -> None:
@@ -299,14 +306,18 @@ class Store:
         self, underlying: str, kind: str, strike: float, expiry_ts: float,
         iv: float, contracts: float, entry_premium: float, genome_id: str | None,
         tp_premium: float | None = None, sl_premium: float | None = None,
+        instrument_type: str = "option", barrier: float | None = None,
+        ratio: float | None = None, isin: str | None = None,
     ) -> int:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO option_positions(underlying,kind,strike,expiry_ts,iv,"
-                "contracts,entry_premium,opened_ts,genome_id,tp_premium,sl_premium) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "contracts,entry_premium,opened_ts,genome_id,tp_premium,sl_premium,"
+                "instrument_type,barrier,ratio,isin) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (underlying, kind, strike, expiry_ts, iv, contracts, entry_premium,
-                 time.time(), genome_id, tp_premium, sl_premium),
+                 time.time(), genome_id, tp_premium, sl_premium,
+                 instrument_type, barrier, ratio, isin),
             )
             self._conn.commit()
             return int(cur.lastrowid)
