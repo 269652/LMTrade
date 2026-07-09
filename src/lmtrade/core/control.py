@@ -28,10 +28,13 @@ _VALID_MODES = ("paper", "live")
 
 
 class ControlState:
-    def __init__(self, path: Path, mode: str = "paper", armed: bool = False):
+    def __init__(self, path: Path, mode: str = "paper", armed: bool = False,
+                 double_armed: bool = False):
         self.path = path
         self.mode = mode if mode in _VALID_MODES else "paper"
         self.armed = bool(armed) and self.mode == "live"
+        # Second guard is meaningless unless the first guard is armed.
+        self.double_armed = bool(double_armed) and self.armed
 
     # -- persistence ---------------------------------------------------------
     @classmethod
@@ -39,16 +42,20 @@ class ControlState:
         try:
             data = json.loads(Path(path).read_text())
             return cls(path, mode=data.get("mode", "paper"),
-                       armed=bool(data.get("armed", False)))
+                       armed=bool(data.get("armed", False)),
+                       double_armed=bool(data.get("double_armed", False)))
         except (FileNotFoundError, json.JSONDecodeError, ValueError, OSError):
             return cls(path)   # safe default: paper, disarmed
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps({"mode": self.mode, "armed": self.armed}))
+        self.path.write_text(json.dumps({
+            "mode": self.mode, "armed": self.armed,
+            "double_armed": self.double_armed}))
 
     def as_dict(self) -> dict:
-        return {"mode": self.mode, "armed": self.armed}
+        return {"mode": self.mode, "armed": self.armed,
+                "double_armed": self.double_armed}
 
     # -- transitions ---------------------------------------------------------
     def set_mode(self, mode: str) -> None:
@@ -57,19 +64,20 @@ class ControlState:
         self.mode = mode
         if mode != "live":
             self.armed = False        # leaving live must never stay armed
+            self.double_armed = False
         self._save()
 
     def is_low_balance(self, net_worth: float | None) -> bool:
-        return net_worth is not None and net_worth < LOW_BALANCE_EUR
+        """Below the fee-drag threshold. An UNKNOWN balance is treated as low —
+        the guard fails safe (blocks) rather than executing on a balance it
+        couldn't verify."""
+        return net_worth is None or net_worth < LOW_BALANCE_EUR
 
-    def arm(self, confirm: bool, double_confirm: bool = False,
-            net_worth: float | None = None) -> bool:
-        """Attempt to arm live execution. Returns True only if it actually
-        armed. Requires live mode + confirm, and — when net worth is below
-        LOW_BALANCE_EUR — a second double_confirm as well."""
+    def arm(self, confirm: bool) -> bool:
+        """Arm the first guard (live execution). Requires live mode + confirm.
+        Below LOW_BALANCE_EUR this alone does NOT enable execution — the second
+        guard (set_double_armed) is enforced separately at execution time."""
         if self.mode != "live" or not confirm:
-            return False
-        if self.is_low_balance(net_worth) and not double_confirm:
             return False
         self.armed = True
         self._save()
@@ -77,9 +85,34 @@ class ControlState:
 
     def disarm(self) -> None:
         self.armed = False
+        self.double_armed = False
+        self._save()
+
+    def set_double_armed(self, confirm: bool) -> bool:
+        """Arm the second (low-balance) guard. Requires the first guard armed
+        and its own explicit confirm."""
+        if not self.armed or not confirm:
+            return False
+        self.double_armed = True
+        self._save()
+        return True
+
+    def double_disarm(self) -> None:
+        self.double_armed = False
         self._save()
 
     @property
     def live_armed(self) -> bool:
-        """True only when real orders should actually be placed."""
+        """First guard: whether the LIVE (real) broker is used at all. The
+        low-balance second guard is enforced per-order via is_executing()."""
         return self.mode == "live" and self.armed
+
+    def low_balance_blocks(self, net_worth: float | None) -> bool:
+        """True when a real order must be blocked purely because the balance is
+        low and the second guard isn't armed."""
+        return self.is_low_balance(net_worth) and not self.double_armed
+
+    def is_executing(self, net_worth: float | None) -> bool:
+        """Whether REAL orders actually fire right now — the single source of
+        truth for both the engine's runtime block and the dashboard banner."""
+        return self.live_armed and not self.low_balance_blocks(net_worth)

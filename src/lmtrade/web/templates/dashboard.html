@@ -94,6 +94,16 @@
   .btn { cursor:pointer; border-radius:8px; padding:8px 16px; font-size:13px; border:1px solid var(--line);
          background:var(--panel2); color:var(--text); }
   .btn.primary { background:var(--blue); border-color:var(--blue); color:#04101f; font-weight:600; }
+  .exec-banner { display:none; margin-top:16px; padding:12px 16px; border-radius:10px; font-size:13px;
+                 border:1px solid var(--line); align-items:center; gap:10px; }
+  .exec-banner.show { display:flex; }
+  .exec-banner .ic { font-size:18px; }
+  .exec-live { background:rgba(248,81,73,.10); border-color:var(--red); color:var(--text); }
+  .exec-sim  { background:rgba(88,166,255,.08); border-color:var(--blue); color:var(--text); }
+  .guard2 { display:none; align-items:center; gap:6px; margin-left:6px; padding-left:10px;
+            border-left:1px solid var(--line); }
+  .guard2.show { display:inline-flex; }
+  .guard2 label { color:var(--amber); }
 </style>
 </head>
 <body>
@@ -104,6 +114,11 @@
     <label title="Arm real Trade Republic order execution">
       <input type="checkbox" id="arm-toggle"> arm live execution
     </label>
+    <span id="guard2" class="guard2">
+      <label title="Second guard: allow real orders while net worth is under the low-balance threshold">
+        <input type="checkbox" id="arm2-toggle"> allow low-balance orders
+      </label>
+    </span>
     <span id="armed-flag" class="armed-flag">● ARMED — REAL ORDERS</span>
   </span>
   <span class="spacer"></span>
@@ -132,6 +147,7 @@
   </div>
 </div>
 <main>
+  <div id="exec-banner" class="exec-banner"><span class="ic" id="exec-ic"></span><span id="exec-text"></span></div>
   <div id="econ" class="econ-banner econ-ok">loading economics…</div>
 
   <div class="grid" style="margin-top:16px;">
@@ -140,7 +156,7 @@
     <div class="card"><div class="k">Reserved</div><div class="v" id="reserve">—</div><div class="sub">stashed profit (protected)</div></div>
     <div class="card"><div class="k">Positions</div><div class="v" id="npos">—</div><div class="sub">open</div></div>
     <div class="card"><div class="k">Realized P&amp;L</div><div class="v" id="realized">—</div><div class="sub" id="realized-sub">closed trades</div></div>
-    <div class="card"><div class="k">TR Account Cash</div><div class="v" id="trcash">—</div><div class="sub">live Trade Republic balance</div></div>
+    <div class="card" id="trcash-card"><div class="k">TR Account Cash</div><div class="v" id="trcash">—</div><div class="sub">live Trade Republic balance</div></div>
   </div>
 
   <section>

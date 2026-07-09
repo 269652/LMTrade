@@ -273,24 +273,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # ------------------------------------------------------------- control plane
     def _live_net_worth() -> float | None:
         econ = store_for("live").get_meta("economics", {}) or {}
+        # Prefer the REAL TR account balance (what the guard actually gates
+        # on), from whichever book the engine wrote it into; fall back to the
+        # live book's computed net worth.
+        real = (store_for("live").get_meta("tr_account_cash")
+                or store_for("paper").get_meta("tr_account_cash"))
+        if real is not None:
+            return float(real)
         nw = econ.get("net_worth_eur")
-        if nw is not None:
-            return float(nw)
-        tr_cash = store_for("live").get_meta("tr_account_cash")
-        return float(tr_cash) if tr_cash is not None else None
+        return float(nw) if nw is not None else None
 
-    @app.get("/api/control")
-    def get_control() -> JSONResponse:
-        c = control()
-        nw = _live_net_worth()
-        return SafeJSONResponse({
+    def _control_payload(c, nw) -> dict:
+        return {
             "mode": c.mode,
             "armed": c.armed,
+            "double_armed": c.double_armed,
             "live_armed": c.live_armed,
             "net_worth": nw,
             "low_balance": c.is_low_balance(nw),
             "low_balance_threshold": LOW_BALANCE_EUR,
-        })
+            # Single source of truth for the IS/IS-NOT-executing banner.
+            "executing": c.is_executing(nw),
+        }
+
+    @app.get("/api/control")
+    def get_control() -> JSONResponse:
+        return SafeJSONResponse(_control_payload(control(), _live_net_worth()))
 
     @app.post("/api/control/mode")
     def set_mode(payload: dict) -> JSONResponse:
@@ -300,27 +308,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             c.set_mode(mode)
         except ValueError:
             return SafeJSONResponse({"error": f"invalid mode {mode!r}"}, status_code=400)
-        return SafeJSONResponse({"mode": c.mode, "armed": c.armed})
+        return SafeJSONResponse(_control_payload(c, _live_net_worth()))
 
     @app.post("/api/control/arm")
     def arm(payload: dict) -> JSONResponse:
-        payload = payload or {}
         c = control()
-        nw = _live_net_worth()
-        ok = c.arm(confirm=bool(payload.get("confirm")),
-                   double_confirm=bool(payload.get("double_confirm")),
-                   net_worth=nw)
-        resp = {"armed": c.armed, "accepted": ok, "net_worth": nw,
-                "low_balance": c.is_low_balance(nw)}
-        if not ok and c.mode == "live" and c.is_low_balance(nw):
-            resp["needs_double_confirm"] = True
-        return SafeJSONResponse(resp)
+        c.arm(confirm=bool((payload or {}).get("confirm")))
+        return SafeJSONResponse(_control_payload(c, _live_net_worth()))
 
     @app.post("/api/control/disarm")
     def disarm() -> JSONResponse:
         c = control()
         c.disarm()
-        return SafeJSONResponse({"armed": c.armed})
+        return SafeJSONResponse(_control_payload(c, _live_net_worth()))
+
+    @app.post("/api/control/double-arm")
+    def double_arm(payload: dict) -> JSONResponse:
+        c = control()
+        c.set_double_armed(confirm=bool((payload or {}).get("confirm")))
+        return SafeJSONResponse(_control_payload(c, _live_net_worth()))
+
+    @app.post("/api/control/double-disarm")
+    def double_disarm() -> JSONResponse:
+        c = control()
+        c.double_disarm()
+        return SafeJSONResponse(_control_payload(c, _live_net_worth()))
 
     # ---------------------------------------------------------------- settings
     @app.get("/api/settings")

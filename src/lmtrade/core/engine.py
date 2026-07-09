@@ -37,6 +37,7 @@ from ..models.providers import build_providers
 from ..research.daily import DailyAnalyst
 from ..research.news import NewsService
 from ..strategies.optimizer import StrategyOptimizer
+from .control import LOW_BALANCE_EUR
 from .events import EventBus
 from .scheduler import Scheduler
 from .state import Store, Trade
@@ -408,6 +409,22 @@ class Engine:
         armed_real = getattr(self.broker, "armed", False) and hasattr(
             self.broker, "place_order")
         if armed_real:
+            # Runtime low-balance guard (second arming switch): below
+            # LOW_BALANCE_EUR the flat ~1 EUR fee is a >1% drag, so real orders
+            # are blocked unless the user has explicitly armed the second guard.
+            # Checked live against the REAL account balance every order, so it
+            # engages the moment net worth drops under the threshold.
+            from .control import ControlState
+
+            net_worth = self.broker.cash()
+            control = ControlState.load(self.settings.control_path)
+            if control.low_balance_blocks(net_worth):
+                self.bus.warn(
+                    f"LIVE order blocked [{ko.isin}]: balance "
+                    f"{'unknown' if net_worth is None else f'€{net_worth:.2f}'} "
+                    f"is under €{LOW_BALANCE_EUR:.0f} and the low-balance guard "
+                    f"is not armed.", source="engine")
+                return True
             size = int(contracts)   # whole certificates (sellFractions off)
             if size < 1:
                 self.bus.warn(

@@ -26,7 +26,8 @@ def control_for(settings, mode, armed=False) -> ControlState:
     c = ControlState.load(settings.control_path)
     c.set_mode(mode)
     if armed:
-        c.arm(confirm=True, double_confirm=True, net_worth=50.0)
+        c.arm(confirm=True)
+        c.set_double_armed(confirm=True)
     return c
 
 

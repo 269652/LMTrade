@@ -46,12 +46,40 @@ async function refresh() {
 }
 
 function paintControl(ctrl, s) {
+  const isLive = ctrl.mode === "live";
   const badge = $("mode");
   badge.textContent = ctrl.mode;
-  badge.className = "badge " + (ctrl.mode === "live" ? "live" : "paper");
-  $("armwrap").classList.toggle("show", ctrl.mode === "live");
+  badge.className = "badge " + (isLive ? "live" : "paper");
+  $("armwrap").classList.toggle("show", isLive);
   $("arm-toggle").checked = !!ctrl.armed;
   $("armed-flag").classList.toggle("show", !!ctrl.armed);
+
+  // Second guard: only relevant when armed AND the balance is low.
+  const showGuard2 = isLive && ctrl.armed && ctrl.low_balance;
+  $("guard2").classList.toggle("show", showGuard2);
+  $("arm2-toggle").checked = !!ctrl.double_armed;
+
+  // IS / IS-NOT executing real orders banner — the single most important
+  // status in live mode. Hidden entirely in paper mode.
+  const b = $("exec-banner");
+  b.classList.toggle("show", isLive);
+  if (isLive) {
+    if (ctrl.executing) {
+      b.className = "exec-banner show exec-live";
+      $("exec-ic").textContent = "🔴";
+      $("exec-text").innerHTML = "<b>EXECUTING REAL ORDERS</b> — live Trade Republic "
+        + "fills with real money. Disarm to stop.";
+    } else {
+      b.className = "exec-banner show exec-sim";
+      $("exec-ic").textContent = "🛡️";
+      const why = !ctrl.armed
+        ? "not armed — simulating on paper"
+        : ctrl.low_balance
+          ? `net worth under €${ctrl.low_balance_threshold} — low-balance guard not armed`
+          : "simulating";
+      $("exec-text").innerHTML = `<b>NOT executing real orders</b> (${why}).`;
+    }
+  }
 }
 
 function paintSummary(s) {
@@ -104,6 +132,10 @@ function paintSummary(s) {
   $("reserve").textContent = fmt(s.reserve != null ? s.reserve : (econ.reserve_eur || 0)) + " " + cur;
   $("npos").textContent = s.num_positions;
   const compute = (econ.gpu_cost_accrued_usd || 0) + (econ.inference_cost_usd || 0);
+  // In live mode the CASH card already IS the real TR balance, so the separate
+  // TR Account Cash card is redundant — hide it. Keep it in paper mode.
+  const trCard = $("trcash-card");
+  if (trCard) trCard.style.display = isLive ? "none" : "";
   $("trcash").textContent = s.tr_account_cash != null ? fmt(s.tr_account_cash) + " " + cur : "—";
 
   const banner = $("econ");
@@ -297,23 +329,38 @@ $("arm-toggle").addEventListener("change", async (e) => {
     refresh();
     return;
   }
-  // Arming: hard confirmation, plus a second one below the fee-drag threshold.
+  // First guard: hard confirmation. Below the fee-drag threshold this arms
+  // but does NOT execute yet — the second guard (below) is required.
   const nw = ctrl.net_worth != null ? ctrl.net_worth.toFixed(2) + " EUR" : "unknown";
   if (!confirm("⚠ ARM REAL LIVE EXECUTION ⚠\n\nThe bot will place REAL Trade " +
                "Republic orders with REAL money, against TR's ToS. Fills are " +
                "irreversible.\n\nLive net worth: " + nw + "\n\nProceed?")) {
     e.target.checked = false; return;
   }
-  let res = await postJSON("/api/control/arm", {confirm: true});
-  if (!res.accepted && res.needs_double_confirm) {
-    if (!confirm("SECOND CONFIRMATION REQUIRED\n\nNet worth is below " +
-                 "100 EUR, where the flat ~1 EUR fee is more than 1% of the " +
-                 "account — a severe drag. Arm anyway?")) {
-      e.target.checked = false; return;
-    }
-    res = await postJSON("/api/control/arm", {confirm: true, double_confirm: true});
-  }
+  const res = await postJSON("/api/control/arm", {confirm: true});
   if (!res.armed) e.target.checked = false;
+  refresh();
+});
+
+// Second guard: allow real orders while net worth is under the threshold.
+$("arm2-toggle").addEventListener("change", async (e) => {
+  const ctrl = window._ctrl || {};
+  if (!e.target.checked) {
+    await postJSON("/api/control/double-disarm", {});
+    refresh();
+    return;
+  }
+  const thr = ctrl.low_balance_threshold || 100;
+  const nw = ctrl.net_worth != null ? ctrl.net_worth.toFixed(2) + " EUR" : "unknown";
+  if (!confirm("⚠ LOW-BALANCE EXECUTION ⚠\n\nNet worth (" + nw + ") is under €" +
+               thr + ". At this size the flat ~1 EUR Trade Republic fee is more " +
+               "than 10% of a typical order — a severe drag that is STRONGLY " +
+               "ADVISED AGAINST.\n\nArm the second guard to execute real orders " +
+               "anyway?")) {
+    e.target.checked = false; return;
+  }
+  const res = await postJSON("/api/control/double-arm", {confirm: true});
+  if (!res.double_armed) e.target.checked = false;
   refresh();
 });
 

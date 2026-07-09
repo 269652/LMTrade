@@ -25,7 +25,7 @@ class TestDefaultsAndPersistence:
     def test_roundtrips_via_disk(self, path):
         c = ControlState.load(path)
         c.set_mode("live")
-        c.arm(confirm=True, net_worth=500.0)
+        c.arm(confirm=True)
         again = ControlState.load(path)
         assert again.mode == "live"
         assert again.armed is True
@@ -50,7 +50,7 @@ class TestModeSwitch:
     def test_switch_back_to_paper_disarms(self, path):
         c = ControlState.load(path)
         c.set_mode("live")
-        c.arm(confirm=True, net_worth=500.0)
+        c.arm(confirm=True)
         assert c.armed is True
         c.set_mode("paper")
         assert c.armed is False        # leaving live must never leave it armed
@@ -64,44 +64,117 @@ class TestModeSwitch:
 class TestArmingGuard:
     def test_cannot_arm_in_paper_mode(self, path):
         c = ControlState.load(path)
-        assert c.arm(confirm=True, net_worth=500.0) is False
+        assert c.arm(confirm=True) is False
         assert c.armed is False
 
     def test_arm_requires_confirm(self, path):
         c = ControlState.load(path)
         c.set_mode("live")
-        assert c.arm(confirm=False, net_worth=500.0) is False
+        assert c.arm(confirm=False) is False
         assert c.armed is False
 
-    def test_arm_with_confirm_above_threshold(self, path):
+    def test_arm_with_confirm(self, path):
         c = ControlState.load(path)
         c.set_mode("live")
-        assert c.arm(confirm=True, net_worth=500.0) is True
+        assert c.arm(confirm=True) is True
         assert c.armed is True
 
-    def test_low_net_worth_needs_double_confirm(self, path):
+    def test_disarm_clears_both_guards(self, path):
         c = ControlState.load(path)
         c.set_mode("live")
-        # Under the fee-drag threshold: single confirm is not enough.
-        assert c.arm(confirm=True, net_worth=LOW_BALANCE_EUR - 1) is False
-        assert c.armed is False
-        assert c.arm(confirm=True, double_confirm=True,
-                     net_worth=LOW_BALANCE_EUR - 1) is True
-        assert c.armed is True
-
-    def test_at_threshold_single_confirm_ok(self, path):
-        c = ControlState.load(path)
-        c.set_mode("live")
-        assert c.arm(confirm=True, net_worth=LOW_BALANCE_EUR) is True
-
-    def test_disarm(self, path):
-        c = ControlState.load(path)
-        c.set_mode("live")
-        c.arm(confirm=True, net_worth=500.0)
+        c.arm(confirm=True)
+        c.set_double_armed(confirm=True)
         c.disarm()
         assert c.armed is False
+        assert c.double_armed is False
 
     def test_low_balance_flag(self, path):
         c = ControlState.load(path)
         assert c.is_low_balance(50.0) is True
         assert c.is_low_balance(150.0) is False
+        assert c.is_low_balance(None) is True        # unknown -> treat as low
+
+
+class TestSecondGuard:
+    """The second (low-balance) guard is a SEPARATE persistent switch,
+    enforced at execution time — not a one-shot confirm at arm time. Real
+    orders below LOW_BALANCE_EUR require it in addition to the first guard."""
+
+    def _armed_live(self, path):
+        c = ControlState.load(path)
+        c.set_mode("live")
+        c.arm(confirm=True)
+        return c
+
+    def test_double_arm_requires_first_guard(self, path):
+        c = ControlState.load(path)          # paper, not armed
+        assert c.set_double_armed(confirm=True) is False
+        assert c.double_armed is False
+
+    def test_double_arm_requires_confirm(self, path):
+        c = self._armed_live(path)
+        assert c.set_double_armed(confirm=False) is False
+        assert c.double_armed is False
+
+    def test_double_arm_sets_flag(self, path):
+        c = self._armed_live(path)
+        assert c.set_double_armed(confirm=True) is True
+        assert c.double_armed is True
+
+    def test_double_disarm(self, path):
+        c = self._armed_live(path)
+        c.set_double_armed(confirm=True)
+        c.double_disarm()
+        assert c.double_armed is False
+
+    def test_disarming_first_guard_clears_second(self, path):
+        c = self._armed_live(path)
+        c.set_double_armed(confirm=True)
+        c.disarm()
+        assert c.double_armed is False
+
+    def test_switching_to_paper_clears_both(self, path):
+        c = self._armed_live(path)
+        c.set_double_armed(confirm=True)
+        c.set_mode("paper")
+        assert c.armed is False and c.double_armed is False
+
+
+class TestExecutionGating:
+    """is_executing(net_worth) — whether REAL orders fire right now — drives
+    both the engine's runtime block and the dashboard's IS/IS-NOT banner."""
+
+    def _armed(self, path, double=False):
+        c = ControlState.load(path)
+        c.set_mode("live")
+        c.arm(confirm=True)
+        if double:
+            c.set_double_armed(confirm=True)
+        return c
+
+    def test_not_executing_in_paper(self, path):
+        assert ControlState.load(path).is_executing(500.0) is False
+
+    def test_not_executing_when_unarmed(self, path):
+        c = ControlState.load(path)
+        c.set_mode("live")
+        assert c.is_executing(500.0) is False
+
+    def test_executing_when_armed_and_healthy_balance(self, path):
+        assert self._armed(path).is_executing(500.0) is True
+
+    def test_blocked_below_threshold_without_second_guard(self, path):
+        c = self._armed(path)
+        assert c.is_executing(LOW_BALANCE_EUR - 1) is False
+        assert c.is_executing(None) is False          # unknown balance blocks too
+
+    def test_allowed_below_threshold_with_second_guard(self, path):
+        c = self._armed(path, double=True)
+        assert c.is_executing(LOW_BALANCE_EUR - 1) is True
+
+    def test_at_threshold_no_second_guard_needed(self, path):
+        assert self._armed(path).is_executing(LOW_BALANCE_EUR) is True
+
+    def test_second_guard_irrelevant_above_threshold(self, path):
+        # double-armed but healthy balance: still executing (guard is a no-op).
+        assert self._armed(path, double=True).is_executing(500.0) is True

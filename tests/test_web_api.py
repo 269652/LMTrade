@@ -252,21 +252,44 @@ class TestControlPlane:
         assert r["armed"] is True
         assert cclient.get("/api/control").json()["live_armed"] is True
 
-    def test_low_balance_requires_double_confirm(self, tmp_path):
+    def test_low_balance_second_guard_gates_execution(self, tmp_path):
         s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
                      data={"provider": "synthetic"})
         s.data_dir = tmp_path
         live = Store(s.live_db_path)
-        live.set_meta("economics", {"net_worth_eur": 40.0})   # under threshold
+        live.set_meta("tr_account_cash", 40.0)   # real balance under threshold
         live.close()
         c = TestClient(create_app(s))
         c.post("/api/control/mode", json={"mode": "live"})
-        single = c.post("/api/control/arm", json={"confirm": True}).json()
-        assert single["armed"] is False
-        assert single["needs_double_confirm"] is True
-        dbl = c.post("/api/control/arm",
-                     json={"confirm": True, "double_confirm": True}).json()
-        assert dbl["armed"] is True
+        # First guard arms, but with a low balance it is NOT executing yet.
+        armed = c.post("/api/control/arm", json={"confirm": True}).json()
+        assert armed["armed"] is True
+        assert armed["low_balance"] is True
+        assert armed["executing"] is False
+        # Second guard flips execution on.
+        dbl = c.post("/api/control/double-arm", json={"confirm": True}).json()
+        assert dbl["double_armed"] is True
+        assert dbl["executing"] is True
+
+    def test_double_disarm_stops_execution(self, tmp_path):
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        live = Store(s.live_db_path)
+        live.set_meta("tr_account_cash", 40.0)
+        live.close()
+        c = TestClient(create_app(s))
+        c.post("/api/control/mode", json={"mode": "live"})
+        c.post("/api/control/arm", json={"confirm": True})
+        c.post("/api/control/double-arm", json={"confirm": True})
+        assert c.get("/api/control").json()["executing"] is True
+        c.post("/api/control/double-disarm")
+        assert c.get("/api/control").json()["executing"] is False
+
+    def test_healthy_balance_executes_without_second_guard(self, cclient):
+        cclient.post("/api/control/mode", json={"mode": "live"})   # net worth 500
+        cclient.post("/api/control/arm", json={"confirm": True})
+        assert cclient.get("/api/control").json()["executing"] is True
 
     def test_disarm(self, cclient):
         cclient.post("/api/control/mode", json={"mode": "live"})

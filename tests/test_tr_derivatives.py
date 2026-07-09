@@ -478,6 +478,69 @@ class TestEngineIntegration:
         opts = store.open_options()
         assert opts and opts[0]["isin"] == "DE000LIVE"
 
+    def test_low_balance_blocks_real_order_without_second_guard(self, settings, store):
+        from lmtrade.brokers.base import OrderResult
+        from lmtrade.core.control import ControlState
+
+        # First guard armed, but balance under 100 and second guard NOT armed.
+        c = ControlState.load(settings.control_path)
+        c.set_mode("live")
+        c.arm(confirm=True)
+        placed = []
+
+        class PoorBroker:
+            mode = "live"
+            armed = True
+
+            def cash(self):
+                return 42.0                      # under LOW_BALANCE_EUR
+
+            def place_order(self, isin, side, size, exchange="LSX"):
+                placed.append(isin)
+                return OrderResult(True, isin, side, size, 0.0, 1.0, "placed")
+
+        client = FakeTRDerivatives(catalog={
+            "AAPL": [TRDerivativeQuote(isin="DE000X", underlying="AAPL",
+                                       kind="ko_call", strike=80.0, barrier=80.0,
+                                       ratio=10.0, price=2.0, leverage=5.0, issuer="B")]})
+        market = ScriptedMarket({"AAPL": Quote("AAPL", 100.0, buy_signal_history(80.0), "yahoo")})
+        engine = Engine(settings, store, PoorBroker(), market=market, tr_derivatives=client)
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert placed == []                      # blocked by the low-balance guard
+        assert store.open_options() == []
+
+    def test_low_balance_allowed_with_second_guard(self, settings, store):
+        from lmtrade.brokers.base import OrderResult
+        from lmtrade.core.control import ControlState
+
+        c = ControlState.load(settings.control_path)
+        c.set_mode("live")
+        c.arm(confirm=True)
+        c.set_double_armed(confirm=True)         # second guard armed
+        placed = []
+
+        class PoorBroker:
+            mode = "live"
+            armed = True
+
+            def cash(self):
+                return 42.0
+
+            def place_order(self, isin, side, size, exchange="LSX"):
+                placed.append(isin)
+                return OrderResult(True, isin, side, size, 0.0, 1.0, "placed")
+
+        client = FakeTRDerivatives(catalog={
+            "AAPL": [TRDerivativeQuote(isin="DE000Y", underlying="AAPL",
+                                       kind="ko_call", strike=80.0, barrier=80.0,
+                                       ratio=10.0, price=2.0, leverage=5.0, issuer="B")]})
+        market = ScriptedMarket({"AAPL": Quote("AAPL", 100.0, buy_signal_history(80.0), "yahoo")})
+        engine = Engine(settings, store, PoorBroker(), market=market, tr_derivatives=client)
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert placed == ["DE000Y"]              # second guard permits it
+
     def test_rejected_live_order_opens_no_position(self, settings, store):
         from lmtrade.brokers.base import OrderResult
 
