@@ -123,11 +123,13 @@ def _build_engine_for_control(settings, control):
     receives ONLY real fills: it is used exclusively when live AND armed
     (real TR broker). Unarmed live is a real-account VIEW — the simulation
     keeps trading the paper book, so the live ledger is never polluted with
-    paper fills and the paper run isn't interrupted by flipping the toggle."""
+    paper fills and the paper run isn't interrupted by flipping the toggle.
+    
+    In all cases, fallback_store is opened to the other book so that if one
+    runs out of analysis (e.g. Claude reached limits), it can use the other's."""
     from .brokers.paper import PaperBroker
     from .brokers.tr_derivatives import build_tr_derivatives
 
-    fallback_store = None
     if control.live_armed:
         from .brokers.trade_republic import TradeRepublicBroker
         try:
@@ -138,9 +140,6 @@ def _build_engine_for_control(settings, control):
             broker = TradeRepublicBroker(store, settings, armed=True)
             console.print("[bold red]⚠ LIVE + ARMED — real Trade Republic orders "
                           "will be placed. Against TR ToS.[/bold red]")
-            # Also open paper store as fallback for analysis (in case Claude
-            # reached limits but paper run succeeded)
-            fallback_store = Store(settings.book_db_path("paper"))
         except RuntimeError as e:
             # TR credentials missing or invalid; fall back to paper
             store.close()
@@ -149,10 +148,18 @@ def _build_engine_for_control(settings, control):
             broker = PaperBroker(store, starting_cash=settings.budget)
             console.print(f"[bold red]⚠ LIVE mode requested but TR setup failed: {e}[/bold red]")
             console.print("[yellow]Falling back to paper trading.[/yellow]")
-    else:
-        book = "paper"
-        store = Store(settings.book_db_path(book))
+        # Live+armed: fallback to paper for analysis
+        fallback_store = Store(settings.book_db_path("paper"))
+    elif control.mode == "live":
+        # Unarmed live: paper engine runs; fallback to live store for analysis
+        store = Store(settings.book_db_path("paper"))
         broker = PaperBroker(store, starting_cash=settings.budget)
+        fallback_store = Store(settings.book_db_path("live"))
+    else:
+        # Paper mode: fallback to live store for analysis (in case live run succeeded)
+        store = Store(settings.book_db_path("paper"))
+        broker = PaperBroker(store, starting_cash=settings.budget)
+        fallback_store = Store(settings.book_db_path("live"))
     tr = build_tr_derivatives(settings)
     engine = Engine(settings, store, broker, tr_derivatives=tr, fallback_store=fallback_store)
     if control.mode == "live" and tr is not None:
@@ -176,6 +183,7 @@ def _build_engine_for_control(settings, control):
             if live_store is not store:
                 live_store.close()
     return engine, store
+
 
 
 def _run_with_control(settings, max_cycles):
