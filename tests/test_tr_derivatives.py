@@ -15,9 +15,11 @@ import pytest
 from lmtrade.agents.fusion import Decision
 from lmtrade.brokers.paper import PaperBroker
 from lmtrade.brokers.tr_derivatives import (
+    WS_MAX_SIZE,
     FakeTRDerivatives,
     PytrDerivatives,
     TRDerivativeQuote,
+    _patch_ws_max_size,
     build_tr_derivatives,
 )
 from lmtrade.config import Settings
@@ -106,6 +108,60 @@ class FakeAsyncTRApi:
 
     async def unsubscribe(self, sub_id):
         self.calls.append(("unsubscribe", sub_id))
+
+
+class FakeWebsocketsModule:
+    """Stand-in for the `websockets` module referenced inside pytr.api, so
+    the max_size patch can be tested without pytr or a real socket."""
+
+    def __init__(self):
+        self.connect_calls: list[dict] = []
+
+        def connect(uri, **kwargs):
+            self.connect_calls.append({"uri": uri, **kwargs})
+            return ("fake-ws", uri, kwargs)
+
+        self.connect = connect
+
+
+class TestWebsocketMaxSizePatch:
+    """TR returns >1 MiB of instruments for a knockout search on a liquid
+    underlying; pytr opens its websocket with the library-default 1 MiB
+    max_size and reconnects on every search, so the frame is rejected with
+    a 1009 'message too big'. We raise the cap on pytr's own connect()."""
+
+    def test_patch_injects_larger_max_size(self):
+        ws = FakeWebsocketsModule()
+        _patch_ws_max_size(ws)
+        ws.connect("wss://api.traderepublic.com", ssl=None)
+        assert ws.connect_calls[-1]["max_size"] == WS_MAX_SIZE
+        assert WS_MAX_SIZE > 1024 * 1024   # bigger than the 1 MiB default
+
+    def test_patch_preserves_explicit_max_size(self):
+        ws = FakeWebsocketsModule()
+        _patch_ws_max_size(ws)
+        ws.connect("wss://x", max_size=999)
+        assert ws.connect_calls[-1]["max_size"] == 999
+
+    def test_patch_is_idempotent(self):
+        ws = FakeWebsocketsModule()
+        original = ws.connect
+        _patch_ws_max_size(ws)
+        once = ws.connect
+        _patch_ws_max_size(ws)
+        assert ws.connect is once            # not re-wrapped
+        assert ws.connect is not original    # but was wrapped the first time
+        ws.connect("wss://x")
+        assert ws.connect_calls[-1]["max_size"] == WS_MAX_SIZE
+
+    def test_patch_forwards_other_kwargs_and_return(self):
+        ws = FakeWebsocketsModule()
+        _patch_ws_max_size(ws)
+        result = ws.connect("wss://y", ssl="ctx", additional_headers={"Cookie": "x"})
+        assert result[0] == "fake-ws"
+        call = ws.connect_calls[-1]
+        assert call["ssl"] == "ctx"
+        assert call["additional_headers"] == {"Cookie": "x"}
 
 
 class TestPytrLoginFlow:

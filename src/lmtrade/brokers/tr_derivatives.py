@@ -32,6 +32,31 @@ from ..logging_setup import get_logger
 
 log = get_logger("lmtrade.tr")
 
+# TR returns the full knockout catalog for an underlying in a single
+# websocket frame — for a liquid name (AAPL etc.) that's well over the
+# websockets library's default 1 MiB max_size, which pytr never raises, so
+# the frame is rejected with a 1009 "message too big". 32 MiB is generous
+# headroom for even the largest catalog while still bounding memory.
+WS_MAX_SIZE = 32 * 1024 * 1024
+
+
+def _patch_ws_max_size(ws_module: Any) -> None:
+    """Wrap the `connect` attribute of pytr's imported `websockets` module so
+    every socket pytr opens defaults to WS_MAX_SIZE instead of the 1 MiB
+    library default. Necessary because pytr calls websockets.connect() with
+    no max_size and reconnects on each search, so we cannot just pre-open one
+    socket ourselves. Idempotent, and leaves an explicit max_size untouched."""
+    connect = getattr(ws_module, "connect", None)
+    if connect is None or getattr(connect, "_lmtrade_patched", False):
+        return
+
+    def patched_connect(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("max_size", WS_MAX_SIZE)
+        return connect(*args, **kwargs)
+
+    patched_connect._lmtrade_patched = True  # type: ignore[attr-defined]
+    ws_module.connect = patched_connect
+
 
 @dataclass
 class TRDerivativeQuote:
@@ -104,9 +129,13 @@ class PytrDerivatives(TRDerivativesBase):
     def _make_api(self) -> Any:
         if self._api_factory is not None:
             return self._api_factory()
-        from pytr.api import TradeRepublicApi  # type: ignore
+        from pytr import api as pytr_api  # type: ignore
 
-        return TradeRepublicApi(phone_no=self._phone, pin=self._pin, save_cookies=True)
+        # Raise pytr's websocket message cap before any connection is opened,
+        # so a >1 MiB knockout catalog frame isn't rejected (see WS_MAX_SIZE).
+        _patch_ws_max_size(pytr_api.websockets)
+        return pytr_api.TradeRepublicApi(
+            phone_no=self._phone, pin=self._pin, save_cookies=True)
 
     def _login(self):
         if self._api is not None or self._failed:
