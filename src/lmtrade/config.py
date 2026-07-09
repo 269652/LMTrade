@@ -51,6 +51,12 @@ class EconomicsConfig(BaseModel):
     inference_cost: dict[str, float] = Field(
         default_factory=lambda: {"slm": 0.0002, "cloud": 0.004, "perplexity": 0.005}
     )
+    # Circuit breaker: halt trading outright if net worth ever implies this
+    # many multiples of the starting budget. Catches runaway valuations from
+    # any bug (e.g. a corrupted mark-to-market) long before they compound,
+    # independent of the root cause. 20x is generous for legitimate options
+    # leverage on a small account over any realistic short timeframe.
+    sanity_max_multiple: float = 20.0
 
 
 class LoopConfig(BaseModel):

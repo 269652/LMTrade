@@ -42,7 +42,7 @@ OPTION_FEE = 0.1   # per option order (paper): smaller than TR's equity fee,
 class Engine:
     def __init__(
         self, settings: Settings, store: Store, broker: Broker,
-        news_fetcher=None, analysis_caller=None,
+        news_fetcher=None, analysis_caller=None, market=None,
         now: Callable[[], float] = time.time,
     ):
         self.settings = settings
@@ -50,8 +50,9 @@ class Engine:
         self.broker = broker
         self.now = now
         self.bus = EventBus(store)
-        self.market = MarketData(settings.data.provider,
-                                 intraday=settings.data.intraday)
+        self.market = market or MarketData(settings.data.provider,
+                                           intraday=settings.data.intraday)
+        self._last_good_price: dict[str, float] = {}
         self.fusion = FusionEngine(settings, build_providers(settings))
         self.accountant = CostAccountant(settings, store)
         self.scheduler = Scheduler(store, now=now)
@@ -69,6 +70,19 @@ class Engine:
         store.set_meta("universe", settings.universe)
 
     # ------------------------------------------------------------------ helpers
+    def _is_trustworthy(self, quote: Quote) -> bool:
+        """A quote is trustworthy if its source matches what the configured
+        provider promises. When live data is expected (provider != synthetic)
+        but MarketData silently fell back to synthetic (network hiccup, rate
+        limiting, ...), the quote is a different price regime entirely and
+        must never be used to mark or trade an existing/new position — mixing
+        a real strike with a synthetic mark (or vice versa) produces
+        nonsensical P&L. See test_data_source_safety.py for the incident this
+        guards against."""
+        if self.settings.data.provider == "synthetic":
+            return True
+        return quote.source != "synthetic"
+
     def _positions_value(self, prices: dict[str, float]) -> float:
         total = 0.0
         for pos in self.store.positions():
@@ -119,10 +133,13 @@ class Engine:
         self.store.set_meta("alpha", round(bot_equity - bench_equity, 6))
 
     # ------------------------------------------------------------ option exits
-    def _manage_options(self, prices: dict[str, float]) -> None:
+    def _manage_options(self, prices: dict[str, float], tradeable: set[str]) -> None:
         cfg = self.settings.options
         for o in self.store.open_options():
-            spot = prices.get(o["underlying"])
+            underlying = o["underlying"]
+            if underlying not in tradeable:
+                continue  # no fresh trustworthy quote this cycle — leave untouched
+            spot = prices.get(underlying)
             if spot is None:
                 continue
             mark = mark_option(spot, o["strike"], o["expiry_ts"], o["iv"], o["kind"])
@@ -249,15 +266,34 @@ class Engine:
         symbols = list(dict.fromkeys(
             self.settings.universe + [self.settings.benchmark.symbol]))
         quotes: dict[str, Quote] = {}
-        prices: dict[str, float] = {}
+        prices: dict[str, float] = {}     # valuation prices: fresh, or last-known-good
+        tradeable: set[str] = set()        # symbols with a FRESH trustworthy quote
+        degraded: list[str] = []
         for symbol in symbols:
             q = self.market.quote(symbol)
             quotes[symbol] = q
-            prices[symbol] = q.price
+            if self._is_trustworthy(q):
+                prices[symbol] = q.price
+                self._last_good_price[symbol] = q.price
+                tradeable.add(symbol)
+            else:
+                degraded.append(symbol)
+                if symbol in self._last_good_price:
+                    prices[symbol] = self._last_good_price[symbol]
+        if degraded:
+            self.bus.warn(
+                f"Live data unavailable this cycle for {degraded} (fell back to "
+                "synthetic) — using last known price for valuation only; no "
+                "new trades or exits on these symbols this cycle.",
+                source="data")
 
-        # exits always run, even when halted
-        self._manage_options(prices)
+        # exits always run (even when halted), but only for symbols with a
+        # fresh trustworthy quote — never mark/close against a stale or
+        # mismatched-source price.
+        self._manage_options(prices, tradeable)
         for symbol in self.settings.universe:
+            if symbol not in tradeable:
+                continue
             pos = self.store.position(symbol)
             if pos:
                 exit_now, why = should_exit(avg_price=pos.avg_price,
@@ -283,7 +319,14 @@ class Engine:
             f"{'SELF-SUSTAINING' if econ.self_sustaining else 'subsidised'}",
             detail=econ.as_dict())
 
-        if econ.halt_trading:
+        if econ.sanity_breached:
+            self.bus.error(
+                f"SANITY BREACH: net worth €{econ.net_worth_eur:.2f} exceeds "
+                f"{self.settings.economics.sanity_max_multiple}x starting budget — "
+                "trading halted unconditionally. This indicates a valuation bug, "
+                "not a real gain. Investigate before resuming.",
+                source="economics")
+        elif econ.halt_trading:
             self.bus.warn(
                 f"Runway {econ.runway_hours:.1f}h < floor — exits only.",
                 source="economics")
@@ -292,6 +335,8 @@ class Engine:
             for symbol in self.settings.universe:
                 if open_count >= self.settings.loop.max_positions:
                     break
+                if symbol not in tradeable:
+                    continue
                 if self.store.position(symbol) or any(
                         o["underlying"] == symbol for o in self.store.open_options()):
                     continue

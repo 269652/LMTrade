@@ -37,6 +37,7 @@ class EconomicsSnapshot:
     self_sustaining: bool
     halt_trading: bool
     pnl_eur: float
+    sanity_breached: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -50,6 +51,7 @@ class EconomicsSnapshot:
             "self_sustaining": self.self_sustaining,
             "halt_trading": self.halt_trading,
             "pnl_eur": round(self.pnl_eur, 4),
+            "sanity_breached": self.sanity_breached,
         }
 
 
@@ -98,7 +100,13 @@ class CostAccountant:
         total_compute_usd = gpu_usd + inference_usd
         self_sustaining = pnl_eur * EUR_USD >= total_compute_usd
 
-        halt = runway < self.min_runway
+        # Circuit breaker: an implausible net-worth multiple means something is
+        # corrupting valuation (a bad mark-to-market, a mispriced fill, a
+        # source mismatch) — halt unconditionally rather than let it compound.
+        sanity_ceiling = starting * self.settings.economics.sanity_max_multiple
+        sanity_breached = net_eur > sanity_ceiling or net_eur < 0
+
+        halt = (runway < self.min_runway) or sanity_breached
         return EconomicsSnapshot(
             net_worth_eur=net_eur,
             net_worth_usd=net_usd,
@@ -110,6 +118,7 @@ class CostAccountant:
             self_sustaining=self_sustaining,
             halt_trading=halt,
             pnl_eur=pnl_eur,
+            sanity_breached=sanity_breached,
         )
 
     def can_afford_inference(self, snapshot: EconomicsSnapshot, est_usd: float) -> bool:
