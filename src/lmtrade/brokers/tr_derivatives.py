@@ -123,9 +123,13 @@ class PytrDerivatives(TRDerivativesBase):
             # degrade instead, same as any other unavailable-provider case.
             if not api.resume_websession():
                 log.warning(
-                    "TR session not resumable — run `pytr login` interactively "
-                    "once on this machine to (re)pair, then restart LMTrade. "
-                    "Falling back to synthetic instruments for now.")
+                    "TR session not resumable — no cached session cookie found "
+                    "(or it expired). Run `pytr login -n \"<TR_PHONE>\" -p "
+                    "\"<TR_PIN>\" --store_credentials` once interactively (the "
+                    "--store_credentials flag is required, or nothing persists "
+                    "to disk; the phone number must match TR_PHONE "
+                    "character-for-character), then restart LMTrade. Falling "
+                    "back to synthetic instruments for now.")
                 self._failed = True
                 return None
             self._api = api

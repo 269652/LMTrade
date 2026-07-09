@@ -84,9 +84,14 @@ single call where the AskUserQuestion tool allows multiple questions at once.
     pricing) for its simulated trades instead of synthetic options — no
     orders are ever placed. Trade Republic has **no API key** — the
     unofficial adapter uses phone number + app PIN (same as the mobile
-    app), first pairing needs one interactive 2FA (`pytr login`), TR's API
-    is websocket-based (blocked by some proxies), and it's against TR's
-    ToS either way. For live mode, reiterate clearly: order placement is
+    app), first pairing needs one interactive 2FA — run
+    `pytr login -n "<TR_PHONE value>" -p "<TR_PIN value>" --store_credentials`
+    (the `--store_credentials` flag is required or nothing persists to disk
+    and the bot fails to resume the session every time; the phone number
+    must match `TR_PHONE` character-for-character since pytr names the
+    cookie file after it). TR's API is websocket-based (blocked by some
+    proxies), and it's against TR's ToS either way. For live mode,
+    reiterate clearly: order placement is
     disabled by a deliberate code guard (`brokers/trade_republic.py`) that
     the user must remove themselves after reading and accepting the risk —
     do not offer to remove that guard as part of setup.

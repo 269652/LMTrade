@@ -32,9 +32,17 @@ step — not a config flip.
    TR_PHONE=+49...
    TR_PIN=1234
    ```
-3. Complete the **one-time 2FA pairing**. `pytr` triggers an app/SMS challenge on
-   first login; you must run an interactive login once and persist the cookie so
-   the unattended bot can reuse the session. See pytr's docs for `pytr login`.
+3. Complete the **one-time 2FA pairing** — and pass `--store_credentials`, or
+   nothing gets saved and the bot will fail to resume the session every time:
+   ```bash
+   pytr login -n "+49..." -p "1234" --store_credentials
+   ```
+   Use the **exact same phone number format** here as `TR_PHONE` in `.env` —
+   pytr names the cookie file after it (`~/.pytr/cookies.<phone_no>.txt`), so
+   a formatting mismatch (spacing, missing country code, etc.) means the bot
+   silently finds no session to resume. Without `--store_credentials`, `pytr`
+   completes the 2FA challenge but writes nothing to disk — the login
+   "succeeds" for that one process and leaves nothing for the bot to reuse.
 4. Review and implement the guarded `_place()` method against **your** installed
    `pytr` version (field names and order endpoints vary by version). Test with
    the **smallest possible** order first.
