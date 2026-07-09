@@ -526,18 +526,30 @@ class Engine:
         # knockout (call or put variant) is always a BUY of the certificate.
         # Real fills happen at TR; we don't touch local simulated cash (the
         # live view's balances come from the real TR account).
-        armed_real = getattr(self.broker, "armed", False) and hasattr(
-            self.broker, "place_order")
+        from .control import ControlState
+        
+        control = ControlState.load(self.settings.control_path)
+        broker_armed = getattr(self.broker, "armed", False)
+        has_place_order = hasattr(self.broker, "place_order")
+        net_worth = self.broker.cash()
+        can_execute = control.is_executing(net_worth)
+        armed_real = broker_armed and has_place_order and can_execute
+        
+        if not armed_real and broker_armed:
+            # Debug: show why execution didn't happen even though broker is armed
+            self.bus.info(
+                f"[execution] {quote.symbol} {decision.direction}: "
+                f"broker_armed={broker_armed} has_place_order={has_place_order} "
+                f"control.is_executing={can_execute} (net_worth={net_worth:.2f})",
+                source="engine")
+        
         if armed_real:
             # Runtime low-balance guard (second arming switch): below
             # LOW_BALANCE_EUR the flat ~1 EUR fee is a >1% drag, so real orders
             # are blocked unless the user has explicitly armed the second guard.
             # Checked live against the REAL account balance every order, so it
             # engages the moment net worth drops under the threshold.
-            from .control import ControlState
-
             net_worth = self.broker.cash()
-            control = ControlState.load(self.settings.control_path)
             if control.low_balance_blocks(net_worth):
                 self.bus.warn(
                     f"LIVE order blocked [{ko.isin}]: balance "
@@ -557,6 +569,10 @@ class Engine:
                               f"{res.message}", source="engine")
                 return True   # never fall back to synthetic once live-armed
             contracts = float(size)
+            cost = contracts * ko.price + OPTION_FEE
+            if not self.broker.adjust_cash(-cost):
+                return True
+            self.store.record_cost("fee", OPTION_FEE, "options")
         else:
             cost = contracts * ko.price + OPTION_FEE
             if not self.broker.adjust_cash(-cost):
@@ -819,6 +835,10 @@ class Engine:
                     # Prefer real TR knockout instruments when the (optional)
                     # TR client is authenticated; fall back to synthetic
                     # Black-Scholes options otherwise — unchanged behavior.
+                    self.bus.info(
+                        f"[execution] entering {decision.symbol} {decision.direction} "
+                        f"in {self.broker.mode} mode (broker.armed={getattr(self.broker, 'armed', False)})",
+                        source="engine")
                     if not self._enter_knockout(quote, decision, genome_id):
                         self._enter_option(quote, decision, genome_id)
                 else:

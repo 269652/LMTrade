@@ -209,3 +209,9 @@ class TradeRepublicBroker(Broker):
 
     def sell(self, symbol: str, qty: float, price: float) -> OrderResult:
         return self.place_order(symbol, "sell", qty)
+
+    def adjust_cash(self, delta: float) -> bool:
+       """Stub for real TR broker. Cash adjustments happen server-side via
+       actual orders, not locally. Always returns True since we assume the
+       real account will handle it."""
+       return True
