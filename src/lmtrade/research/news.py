@@ -19,6 +19,13 @@ from ..models.providers import ClaudeCLIProvider, PerplexityProvider
 Fetcher = Callable[[str], tuple[str, float]]
 
 
+def _is_valid_news(text: str) -> bool:
+    """A genuine research response carries the SENTIMENT marker its prompt
+    demands. Anything without it is broken (CLI/shell noise) and must not be
+    cached/served as news."""
+    return bool(text) and "sentiment" in text.lower()
+
+
 def _parse_sentiment(text: str) -> str:
     low = (text or "").lower()
     if "sentiment: bullish" in low or ("bullish" in low and "bearish" not in low):
@@ -48,20 +55,28 @@ class NewsService:
             self.fetcher = None
 
     def get(self, symbol: str) -> dict | None:
-        """Return {text, sentiment, ts} for the symbol — cached if fresh,
-        refetched if stale, None if news is unavailable entirely."""
+        """Return {text, sentiment, ts} for the symbol — cached if fresh AND
+        valid, refetched if stale/missing/corrupt, None if unavailable.
+
+        Corrupt cache guard: a real research response always carries the
+        SENTIMENT marker its prompt demands. An entry lacking it is broken
+        (e.g. CLI/shell error output stored as "neutral" by an older build) —
+        we never serve it and refetch instead, so bad neutrals self-heal
+        rather than persisting for the whole freshness window."""
         max_age = self.settings.research.news_interval_minutes * 60
         cached = self.store.latest_news(symbol)
-        if cached and (self.now() - cached["ts"]) < max_age:
+        cached_ok = bool(cached and _is_valid_news(cached.get("text", "")))
+        if cached_ok and (self.now() - cached["ts"]) < max_age:
             return cached
+        fallback = cached if cached_ok else None   # never fall back to garbage
         if self.fetcher is None:
-            return cached  # possibly None: no source at all
+            return fallback
         try:
             text, cost = self.fetcher(symbol)
         except Exception:  # noqa: BLE001 — news must never take down the engine
-            return cached
+            return fallback
         if not text:
-            return cached
+            return fallback
         if cost > 0:
             self.store.record_cost("inference", cost, "perplexity")
         sentiment = _parse_sentiment(text)

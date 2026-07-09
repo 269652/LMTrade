@@ -317,5 +317,65 @@ $("arm-toggle").addEventListener("change", async (e) => {
   refresh();
 });
 
+// ------------------------------------------------------------------ settings
+const SECTION_LABELS = {
+  general: "General", loop: "Loop", options: "Options", risk: "Risk",
+  economics: "Economics", research: "Research", tr: "Trade Republic",
+  data: "Data", model: "Model",
+};
+
+function fieldInput(f) {
+  const id = "set_" + f.key.replace(/\./g, "_");
+  if (f.kind === "bool") {
+    return `<input type="checkbox" id="${id}" data-key="${f.key}" data-kind="bool" ${f.value ? "checked" : ""}>`;
+  }
+  if (f.kind === "select") {
+    const opts = (f.options || []).map(o =>
+      `<option value="${o}" ${String(f.value) === o ? "selected" : ""}>${o}</option>`).join("");
+    return `<select id="${id}" data-key="${f.key}" data-kind="select">${opts}</select>`;
+  }
+  const type = (f.kind === "number" || f.kind === "int") ? "number" : "text";
+  const step = f.kind === "int" ? "1" : "any";
+  return `<input type="${type}" step="${step}" id="${id}" data-key="${f.key}" data-kind="${f.kind}" value="${f.value}">`;
+}
+
+async function openSettings() {
+  const data = await getJSON("/api/settings");
+  $("settings-note").textContent = data.note || "";
+  const bySection = {};
+  data.fields.forEach(f => { (bySection[f.section] = bySection[f.section] || []).push(f); });
+  let html = "";
+  Object.keys(bySection).forEach(sec => {
+    html += `<div class="setsection">${SECTION_LABELS[sec] || sec}</div>`;
+    bySection[sec].forEach(f => {
+      html += `<div class="setrow"><label>${f.field}</label>${fieldInput(f)}</div>`;
+    });
+  });
+  $("settings-fields").innerHTML = html;
+  $("settings-status").textContent = "";
+  $("settings-overlay").classList.add("show");
+}
+
+async function saveSettings() {
+  const changes = {};
+  document.querySelectorAll("#settings-fields [data-key]").forEach(el => {
+    changes[el.dataset.key] = el.dataset.kind === "bool" ? el.checked : el.value;
+  });
+  $("settings-status").textContent = "Saving…";
+  const res = await postJSON("/api/settings", {changes});
+  const n = Object.keys(res.applied || {}).length;
+  const bad = (res.rejected || []).length;
+  $("settings-status").textContent =
+    `Saved ${n} setting${n === 1 ? "" : "s"}${bad ? `, ${bad} rejected` : ""}. ` +
+    `Restart \`lmtrade run\` to apply.`;
+}
+
+$("settings-btn").addEventListener("click", openSettings);
+$("settings-cancel").addEventListener("click", () => $("settings-overlay").classList.remove("show"));
+$("settings-save").addEventListener("click", saveSettings);
+$("settings-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "settings-overlay") $("settings-overlay").classList.remove("show");
+});
+
 refresh();
 setInterval(refresh, 5000);

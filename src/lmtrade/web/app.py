@@ -17,9 +17,10 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..config import Settings, load_settings
+from ..config import DEFAULT_TOML_PATH, Settings, load_settings
 from ..core.control import LOW_BALANCE_EUR, ControlState
 from ..core.state import Store
+from . import settings_editor
 
 TEMPLATES = Path(__file__).parent / "templates"
 STATIC = Path(__file__).parent / "static"
@@ -305,6 +306,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c = control()
         c.disarm()
         return SafeJSONResponse({"armed": c.armed})
+
+    # ---------------------------------------------------------------- settings
+    @app.get("/api/settings")
+    def get_settings() -> JSONResponse:
+        return SafeJSONResponse({
+            "fields": settings_editor.schema(settings),
+            "config_path": str(DEFAULT_TOML_PATH),
+            "note": "Saved to config.toml. Restart lmtrade run to apply.",
+        })
+
+    @app.post("/api/settings")
+    def post_settings(payload: dict) -> JSONResponse:
+        changes = (payload or {}).get("changes", {})
+        result = settings_editor.apply_changes(DEFAULT_TOML_PATH, changes)
+        return SafeJSONResponse(result)
 
     @app.get("/healthz")
     def healthz() -> dict:

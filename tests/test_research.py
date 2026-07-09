@@ -87,6 +87,37 @@ class TestNewsService:
         svc = NewsService(store, settings, fetcher=None)
         assert svc.get("AAPL") is None               # no key, no crash
 
+    def test_corrupt_cache_is_invalidated_and_refetched(self, store, settings):
+        # A broken entry (no SENTIMENT marker) stored by an older build must be
+        # ignored and refetched, not served for the whole freshness window.
+        store.add_news("AAPL", "Execution errorBatchvorgang abbrechen (J/N)?",
+                       "neutral", ts=1000.0)
+        calls = []
+
+        def fetch(sym):
+            calls.append(sym)
+            return f"{sym} rallies hard. SENTIMENT: bullish", 0.0
+
+        svc = NewsService(store, settings, fetcher=fetch, now=lambda: 1001.0)
+        item = svc.get("AAPL")
+        assert calls == ["AAPL"]                     # refetched despite fresh ts
+        assert item["sentiment"] == "bullish"
+
+    def test_corrupt_cache_with_no_fetcher_returns_none(self, store, settings):
+        store.add_news("AAPL", "garbage without marker", "neutral", ts=1000.0)
+        svc = NewsService(store, settings, fetcher=None, now=lambda: 1001.0)
+        assert svc.get("AAPL") is None               # never serve the garbage
+
+    def test_valid_cache_still_served(self, store, settings):
+        store.add_news("AAPL", "steady. SENTIMENT: neutral", "neutral", ts=1000.0)
+        calls = []
+        svc = NewsService(store, settings,
+                          fetcher=lambda s: (calls.append(s), ("x. SENTIMENT: bullish", 0.0))[1],
+                          now=lambda: 1001.0)
+        item = svc.get("AAPL")
+        assert calls == []                           # fresh + valid -> cache
+        assert item["sentiment"] == "neutral"
+
 
 class TestNewsServiceConcurrentFetch:
     """get_many fetches the whole universe in parallel, bounded by

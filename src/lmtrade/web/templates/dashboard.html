@@ -74,6 +74,26 @@
   .tab .unread { position:absolute; top:-6px; right:-6px; background:var(--red); color:#fff;
                  font-size:10px; font-weight:700; min-width:16px; height:16px; line-height:16px;
                  text-align:center; border-radius:9px; padding:0 4px; }
+  .iconbtn { cursor:pointer; background:var(--panel); border:1px solid var(--line); color:var(--muted);
+             border-radius:8px; padding:5px 9px; font-size:14px; }
+  .iconbtn:hover { color:var(--text); border-color:var(--blue); }
+  .overlay { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; z-index:50;
+             align-items:flex-start; justify-content:center; overflow:auto; padding:40px 16px; }
+  .overlay.show { display:flex; }
+  .modal { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+           padding:22px; width:min(760px,100%); }
+  .modal h2 { margin:0 0 4px; font-size:16px; }
+  .settings-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 20px; margin-top:14px; }
+  .setrow { display:flex; flex-direction:column; gap:4px; }
+  .setrow label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; }
+  .setrow input, .setrow select { background:var(--bg); border:1px solid var(--line); color:var(--text);
+             border-radius:6px; padding:7px 8px; font-size:13px; }
+  .setsection { grid-column:1/-1; color:var(--accent); font-size:12px; text-transform:uppercase;
+                letter-spacing:.5px; border-bottom:1px solid var(--line); padding-bottom:6px; margin-top:8px; }
+  .modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:18px; }
+  .btn { cursor:pointer; border-radius:8px; padding:8px 16px; font-size:13px; border:1px solid var(--line);
+         background:var(--panel2); color:var(--text); }
+  .btn.primary { background:var(--blue); border-color:var(--blue); color:#04101f; font-weight:600; }
 </style>
 </head>
 <body>
@@ -96,7 +116,21 @@
     </svg>
     <span class="dot"></span> live · refresh 5s
   </span>
+  <button id="settings-btn" class="iconbtn" title="Settings">⚙</button>
 </header>
+
+<div id="settings-overlay" class="overlay">
+  <div class="modal">
+    <h2>Settings</h2>
+    <div class="muted" id="settings-note" style="font-size:12px;"></div>
+    <div class="settings-grid" id="settings-fields"></div>
+    <div class="modal-actions">
+      <span id="settings-status" class="muted" style="flex:1; font-size:12px;"></span>
+      <button class="btn" id="settings-cancel">Cancel</button>
+      <button class="btn primary" id="settings-save">Save to config.toml</button>
+    </div>
+  </div>
+</div>
 <main>
   <div id="econ" class="econ-banner econ-ok">loading economics…</div>
 
