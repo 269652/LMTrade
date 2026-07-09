@@ -152,11 +152,13 @@ def _build_engine_for_control(settings, control):
         fallback_store = Store(settings.book_db_path("paper"))
     elif control.mode == "live":
         # Unarmed live: paper engine runs; fallback to live store for analysis
+        book = "paper"
         store = Store(settings.book_db_path("paper"))
         broker = PaperBroker(store, starting_cash=settings.budget)
         fallback_store = Store(settings.book_db_path("live"))
     else:
         # Paper mode: fallback to live store for analysis (in case live run succeeded)
+        book = "paper"
         store = Store(settings.book_db_path("paper"))
         broker = PaperBroker(store, starting_cash=settings.budget)
         fallback_store = Store(settings.book_db_path("live"))
