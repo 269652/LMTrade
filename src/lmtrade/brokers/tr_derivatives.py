@@ -394,9 +394,14 @@ class PytrDerivatives(TRDerivativesBase):
     # (not pytr's named methods) so topics pytr has no wrapper for are still
     # reachable, and try each in order — a rejected TOPIC is not a dead
     # SESSION.
+    # Ordered most-current first: newer accounts serve holdings ONLY via
+    # compactPortfolioByType and reject the classic topics with
+    # BAD_SUBSCRIPTION_TYPE, so trying the modern one first means those
+    # accounts never emit the (noisy but harmless) "Unknown topic type:
+    # compactPortfolio" error. Older accounts fall through to the classic ones.
     _PORTFOLIO_TOPICS = (
+        "compactPortfolioByType",   # current TR app; newer accounts accept only this
         "compactPortfolio",         # classic; still present on older accounts
-        "compactPortfolioByType",   # current TR app; newer accounts only accept this
         "portfolio",                # legacy
         "portfolioStatus",          # last-resort fallback
     )

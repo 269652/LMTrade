@@ -456,16 +456,16 @@ class TestPytrPortfolio:
         client = PytrDerivatives("+49", "1", api_factory=lambda: api)
         out = client.portfolio()
         assert out == [{"isin": "DE000KO1", "size": 5.0, "avg_price": 2.5}]
-        assert api.topics[0] == "compactPortfolio"   # tried the classic one first
+        assert "compactPortfolio" in api.topics       # classic topic accepted here
 
     def test_falls_back_to_portfolio_topic_when_compact_rejected(self):
-        # compactPortfolio unknown to this backend; portfolio accepted.
+        # Both compact topics unknown to this backend; legacy portfolio accepted.
         api = FakePortfolioApi(supported=("portfolio",), positions=self.POSITIONS)
         client = PytrDerivatives("+49", "1", api_factory=lambda: api)
         out = client.portfolio()
         assert out == [{"isin": "DE000KO1", "size": 5.0, "avg_price": 2.5}]
-        # Candidates attempted in order until one is accepted.
-        assert api.topics[:3] == ["compactPortfolio", "compactPortfolioByType", "portfolio"]
+        # Modern topic tried first, then the classic ones, until one is accepted.
+        assert api.topics[:3] == ["compactPortfolioByType", "compactPortfolio", "portfolio"]
 
     def test_newer_account_uses_compact_portfolio_by_type(self):
         # The live regression: both classic topics rejected, holdings served
@@ -685,6 +685,30 @@ class TestEngineIntegration:
         engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
         engine.run_cycle()
         assert placed == ["DE000Y"]              # second guard permits it
+
+    def test_armed_live_no_knockout_does_not_book_synthetic(self, settings, store):
+        # THE phantom-trade bug: in armed live mode, when no real TR knockout
+        # is tradeable, the engine must SKIP — never book a synthetic option,
+        # which would appear on the dashboard as a trade the TR app never made.
+        from lmtrade.brokers.base import OrderResult
+
+        class ArmedBroker:
+            mode = "live"
+            armed = True
+
+            def cash(self):
+                return 1000.0
+
+            def place_order(self, isin, side, size, exchange="LSX"):
+                return OrderResult(True, isin, side, size, 0.0, 1.0, "placed")
+
+        # Empty catalog -> find_knockout returns None -> _enter_knockout False.
+        client = FakeTRDerivatives(catalog={})
+        market = ScriptedMarket({"AAPL": Quote("AAPL", 100.0, buy_signal_history(80.0), "yahoo")})
+        engine = Engine(settings, store, ArmedBroker(), market=market, tr_derivatives=client)
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert store.open_options() == []   # no phantom synthetic option booked
 
     def test_rejected_live_order_opens_no_position(self, settings, store):
         from lmtrade.brokers.base import OrderResult

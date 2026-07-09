@@ -786,13 +786,25 @@ class Engine:
                 if self.settings.options.enabled:
                     # Prefer real TR knockout instruments when the (optional)
                     # TR client is authenticated; fall back to synthetic
-                    # Black-Scholes options otherwise — unchanged behavior.
+                    # Black-Scholes options otherwise.
                     self.bus.info(
                         f"[execution] entering {decision.symbol} {decision.direction} "
                         f"in {self.broker.mode} mode (broker.armed={getattr(self.broker, 'armed', False)})",
                         source="engine")
                     if not self._enter_knockout(quote, decision, genome_id):
-                        self._enter_option(quote, decision, genome_id)
+                        # In ARMED live mode a synthetic option is a PHANTOM: it
+                        # books a local position that was NEVER sent to TR, so
+                        # the dashboard shows "trades" the TR app doesn't have.
+                        # Only simulate (synthetic options) in paper/unarmed
+                        # mode; in armed live, skip when no real instrument is
+                        # tradeable.
+                        if getattr(self.broker, "armed", False):
+                            self.bus.warn(
+                                f"LIVE {decision.symbol}: no real TR knockout "
+                                f"tradeable this cycle — skipping (no synthetic "
+                                f"fallback in armed live mode).", source="engine")
+                        else:
+                            self._enter_option(quote, decision, genome_id)
                 else:
                     self._enter_equity(quote, decision, econ)
 
