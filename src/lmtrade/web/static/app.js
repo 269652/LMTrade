@@ -13,7 +13,7 @@ function sideClass(s) { return s === "buy" ? "buy" : s === "sell" ? "sell" : "ho
 
 async function refresh() {
   try {
-    const [s, trades, activity, logs, equity, strategies, realized, signals, news, analysis] =
+    const [s, trades, activity, logs, equity, strategies, realized, signals, news, analysis, ctrl] =
       await Promise.all([
         getJSON("/api/summary"),
         getJSON("/api/trades?limit=100"),
@@ -25,7 +25,10 @@ async function refresh() {
         getJSON("/api/signals?min_confidence=0.6"),
         getJSON("/api/news"),
         getJSON("/api/analysis"),
+        getJSON("/api/control"),
       ]);
+    window._ctrl = ctrl;
+    paintControl(ctrl, s);
     paintSummary(s);
     paintPositions(s.positions);
     paintTrades(trades);
@@ -42,12 +45,21 @@ async function refresh() {
   }
 }
 
+function paintControl(ctrl, s) {
+  const badge = $("mode");
+  badge.textContent = ctrl.mode;
+  badge.className = "badge " + (ctrl.mode === "live" ? "live" : "paper");
+  $("armwrap").classList.toggle("show", ctrl.mode === "live");
+  $("arm-toggle").checked = !!ctrl.armed;
+  $("armed-flag").classList.toggle("show", !!ctrl.armed);
+}
+
 function paintSummary(s) {
   const cur = s.currency || "EUR";
   $("curr").textContent = cur;
   const mode = $("mode");
-  mode.textContent = s.mode;
-  mode.className = "badge " + (s.mode === "live" ? "live" : "paper");
+  // mode text/class is owned by paintControl; leave it here as a fallback.
+  if (!window._ctrl) { mode.textContent = s.mode; mode.className = "badge " + (s.mode === "live" ? "live" : "paper"); }
 
   const econ = s.economics || {};
   const net = econ.net_worth_eur != null ? econ.net_worth_eur : s.equity;
@@ -62,7 +74,14 @@ function paintSummary(s) {
   const mark = s.last_realized_net_worth != null ? s.last_realized_net_worth : (s.starting_cash || 0);
   $("net").className = "v " + (net < mark - 1e-9 ? "neg" : "pos");
 
-  $("cash").textContent = fmt(s.cash) + " " + cur;
+  // In live mode the headline cash is the real TR account balance. Warn
+  // (amber) below the low-balance threshold, where the flat ~1 EUR fee is a
+  // >1% drag — the same threshold that triggers the double-arm guard.
+  const ctrl = window._ctrl || {};
+  const liveCash = ctrl.mode === "live" && s.tr_account_cash != null ? s.tr_account_cash : s.cash;
+  const cashEl = $("cash");
+  cashEl.textContent = fmt(liveCash) + " " + cur;
+  cashEl.className = "v" + (ctrl.mode === "live" && ctrl.low_balance ? " warn" : "");
   $("reserve").textContent = fmt(s.reserve != null ? s.reserve : (econ.reserve_eur || 0)) + " " + cur;
   $("npos").textContent = s.num_positions;
   const compute = (econ.gpu_cost_accrued_usd || 0) + (econ.inference_cost_usd || 0);
@@ -119,6 +138,22 @@ function paintRealized(r) {
         + `<td><span class="kind">${o.kind}</span></td><td>${o.isin || "—"}</td>`
         + `<td>${fmt(o.entry_premium)}</td><td>${fmt(o.exit_premium)}</td>${pnlCell(o.pnl)}</tr>`).join("")
     : `<tr><td colspan="7" class="muted">No closed trades yet.</td></tr>`;
+
+  // Unread badge: number of realized closes the user hasn't looked at. Total
+  // closed count is wins+losses; we persist the last-seen count and show the
+  // delta until the Realized tab is opened.
+  const closedCount = r ? (r.wins || 0) + (r.losses || 0) : 0;
+  const seen = Number(localStorage.getItem("realizedSeen") || 0);
+  const badge = $("realized-unread");
+  const active = document.querySelector('.tab[data-tab="realized"]').classList.contains("active");
+  if (active) {
+    localStorage.setItem("realizedSeen", String(closedCount));
+    badge.classList.add("hidden");
+  } else {
+    const unread = Math.max(0, closedCount - seen);
+    badge.textContent = unread > 99 ? "99+" : String(unread);
+    badge.classList.toggle("hidden", unread === 0);
+  }
 }
 
 function paintTrades(rows) {
@@ -214,6 +249,53 @@ document.querySelectorAll(".tab").forEach(tab => {
     ["positions", "realized", "signals", "news", "analysis", "strategies", "trades", "activity", "logs"].forEach(name =>
       $("tab-" + name).classList.toggle("hidden", name !== tab.dataset.tab));
   });
+});
+
+async function postJSON(path, body) {
+  const r = await fetch(path, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body || {}),
+  });
+  return r.json();
+}
+
+// Paper/live toggle — click the badge.
+$("mode").addEventListener("click", async () => {
+  const ctrl = window._ctrl || {mode: "paper"};
+  const next = ctrl.mode === "live" ? "paper" : "live";
+  if (next === "live" &&
+      !confirm("Switch to LIVE mode?\n\nThis shows your real Trade Republic " +
+               "account. Execution stays SIMULATED until you separately arm it.")) return;
+  await postJSON("/api/control/mode", {mode: next});
+  refresh();
+});
+
+// Arm / disarm real live execution.
+$("arm-toggle").addEventListener("change", async (e) => {
+  const ctrl = window._ctrl || {};
+  if (!e.target.checked) {
+    await postJSON("/api/control/disarm", {});
+    refresh();
+    return;
+  }
+  // Arming: hard confirmation, plus a second one below the fee-drag threshold.
+  const nw = ctrl.net_worth != null ? ctrl.net_worth.toFixed(2) + " EUR" : "unknown";
+  if (!confirm("⚠ ARM REAL LIVE EXECUTION ⚠\n\nThe bot will place REAL Trade " +
+               "Republic orders with REAL money, against TR's ToS. Fills are " +
+               "irreversible.\n\nLive net worth: " + nw + "\n\nProceed?")) {
+    e.target.checked = false; return;
+  }
+  let res = await postJSON("/api/control/arm", {confirm: true});
+  if (!res.accepted && res.needs_double_confirm) {
+    if (!confirm("SECOND CONFIRMATION REQUIRED\n\nNet worth is below " +
+                 "100 EUR, where the flat ~1 EUR fee is more than 1% of the " +
+                 "account — a severe drag. Arm anyway?")) {
+      e.target.checked = false; return;
+    }
+    res = await postJSON("/api/control/arm", {confirm: true, double_confirm: true});
+  }
+  if (!res.armed) e.target.checked = false;
+  refresh();
 });
 
 refresh();

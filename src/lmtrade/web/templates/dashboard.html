@@ -63,12 +63,29 @@
   .ring { width:18px; height:18px; }
   .ring-progress { animation:ringfill 5s linear infinite; }
   @keyframes ringfill { from { stroke-dashoffset:50.27; } to { stroke-dashoffset:0; } }
+  .badge { cursor:pointer; user-select:none; }
+  .armwrap { display:none; align-items:center; gap:8px; font-size:12px; }
+  .armwrap.show { display:inline-flex; }
+  .armwrap label { display:inline-flex; align-items:center; gap:5px; cursor:pointer; color:var(--muted); }
+  .armed-flag { color:var(--red); font-weight:700; letter-spacing:.5px; display:none; }
+  .armed-flag.show { display:inline; animation:pulse 1.5s infinite; }
+  .v.warn { color:var(--amber); }
+  .tab { position:relative; }
+  .tab .unread { position:absolute; top:-6px; right:-6px; background:var(--red); color:#fff;
+                 font-size:10px; font-weight:700; min-width:16px; height:16px; line-height:16px;
+                 text-align:center; border-radius:9px; padding:0 4px; }
 </style>
 </head>
 <body>
 <header>
   <h1>⚡ LMTrade</h1>
-  <span id="mode" class="badge paper">paper</span>
+  <span id="mode" class="badge paper" title="Click to switch paper / live">paper</span>
+  <span id="armwrap" class="armwrap">
+    <label title="Arm real Trade Republic order execution">
+      <input type="checkbox" id="arm-toggle"> arm live execution
+    </label>
+    <span id="armed-flag" class="armed-flag">● ARMED — REAL ORDERS</span>
+  </span>
   <span class="spacer"></span>
   <span class="refresh">
     <svg class="ring" viewBox="0 0 20 20" aria-hidden="true">
@@ -99,7 +116,7 @@
 
   <div class="tabs">
     <div class="tab active" data-tab="positions">Positions</div>
-    <div class="tab" data-tab="realized">Realized</div>
+    <div class="tab" data-tab="realized">Realized<span id="realized-unread" class="unread hidden"></span></div>
     <div class="tab" data-tab="signals">Signals</div>
     <div class="tab" data-tab="news">News</div>
     <div class="tab" data-tab="analysis">Analysis</div>
