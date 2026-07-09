@@ -37,6 +37,7 @@ from .state import Store, Trade
 
 OPTION_FEE = 0.1   # per option order (paper): smaller than TR's equity fee,
                    # comparable to warrant spreads on tiny notionals
+NEWS_MAX_AGE_S = 24 * 3600   # news older than this no longer influences decisions
 
 
 class Engine:
@@ -146,11 +147,18 @@ class Engine:
             entry = max(1e-9, o["entry_premium"])
             change = (mark - entry) / entry
             hours_left = (o["expiry_ts"] - self.now()) / 3600.0
+            # Every position carries explicit TP/SL levels set at open time —
+            # those govern. Config-derived thresholds are only a fallback for
+            # legacy rows persisted before stops were stored per-position.
+            tp = o.get("tp_premium") or entry * (1 + cfg.take_profit_pct)
+            sl = o.get("sl_premium")
+            if sl is None:
+                sl = entry * (1 - cfg.stop_loss_pct)
             reason = None
-            if change >= cfg.take_profit_pct:
-                reason = f"premium take-profit ({change:+.0%})"
-            elif change <= -cfg.stop_loss_pct:
-                reason = f"premium stop-loss ({change:+.0%})"
+            if mark >= tp:
+                reason = f"take-profit hit (mark {mark:.3f} >= TP {tp:.3f}, {change:+.0%})"
+            elif mark <= sl:
+                reason = f"stop-loss hit (mark {mark:.3f} <= SL {sl:.3f}, {change:+.0%})"
             elif hours_left <= cfg.min_hours_to_expiry:
                 reason = f"expiry window ({hours_left:.1f}h left)"
             if reason is None:
@@ -195,12 +203,25 @@ class Engine:
             genome_id = genome.id
         ctx: dict = {}
         latest = self.store.latest_news(quote.symbol)
-        if latest:
+        if latest and (self.now() - latest["ts"]) < NEWS_MAX_AGE_S:
             ctx["research"] = latest["text"]
             sent = latest.get("sentiment")
             if sent in ("bullish", "bearish"):
                 extra.append(Signal("news", "buy" if sent == "bullish" else "sell",
                                     0.6, f"news sentiment {sent}", 0.0))
+        # Daily market analysis (compiled by the Claude Routine, imported via
+        # `lmtrade import-analysis`) — a directional bias per symbol, valid for
+        # the window it declares.
+        analysis = self.store.get_meta("market_analysis")
+        if analysis:
+            age = self.now() - float(analysis.get("ts", 0))
+            valid_s = float(analysis.get("valid_hours", 24)) * 3600
+            entry = (analysis.get("symbols") or {}).get(quote.symbol)
+            if age < valid_s and entry and entry.get("bias") in ("bullish", "bearish"):
+                direction = "buy" if entry["bias"] == "bullish" else "sell"
+                conf = max(0.0, min(1.0, float(entry.get("confidence", 0.5))))
+                extra.append(Signal("analysis", direction, conf,
+                                    str(entry.get("notes", ""))[:200], 0.0))
         decision = self.fusion.decide(quote, extra_signals=extra, context_extra=ctx)
         self.accountant.record_inference("fusion", decision.inference_cost)
         return decision, genome_id
@@ -222,8 +243,13 @@ class Engine:
         if not self.broker.adjust_cash(-cost):
             return
         self.store.record_cost("fee", OPTION_FEE, "options")
+        # Explicit stops placed with the order: every position always carries
+        # its own TP/SL, immune to later config changes.
+        tp_premium = oq.premium * (1 + cfg.take_profit_pct)
+        sl_premium = oq.premium * (1 - cfg.stop_loss_pct)
         self.store.open_option(quote.symbol, kind, oq.strike, oq.expiry_ts,
-                               oq.iv, contracts, oq.premium, genome_id)
+                               oq.iv, contracts, oq.premium, genome_id,
+                               tp_premium=tp_premium, sl_premium=sl_premium)
         self.store.record_trade(Trade(
             quote.symbol, "buy", contracts, oq.premium, OPTION_FEE,
             self.broker.mode, f"open {kind} K={oq.strike} — {decision.rationale}",

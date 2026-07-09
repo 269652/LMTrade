@@ -35,6 +35,7 @@ model:
     perplexity: 1.2
     strategy: 1.5          # the learned strategy genome's vote
     news: 1.0              # hourly news sentiment vote
+    analysis: 1.5          # daily Claude market-analysis bias
 
 risk:
   max_position_fraction: 0.5

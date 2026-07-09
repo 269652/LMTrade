@@ -36,6 +36,19 @@ fi
 echo "==> Installing..."
 pip install -e . -q
 
+# Optional signal imports, prepared by the invoking Claude Routine session:
+# LMTRADE_NEWS_FILE     — hourly market news:   [{symbol, text, sentiment?}]
+# LMTRADE_ANALYSIS_FILE — daily market analysis: {valid_hours, symbols: {...}}
+# Imported AFTER state restore so they land in the live DB the engine reads.
+if [ -n "${LMTRADE_NEWS_FILE:-}" ] && [ -f "${LMTRADE_NEWS_FILE}" ]; then
+    echo "==> Importing news from ${LMTRADE_NEWS_FILE}..."
+    lmtrade import-news "${LMTRADE_NEWS_FILE}"
+fi
+if [ -n "${LMTRADE_ANALYSIS_FILE:-}" ] && [ -f "${LMTRADE_ANALYSIS_FILE}" ]; then
+    echo "==> Importing analysis from ${LMTRADE_ANALYSIS_FILE}..."
+    lmtrade import-analysis "${LMTRADE_ANALYSIS_FILE}"
+fi
+
 echo "==> Running $CYCLES cycles at ${INTERVAL}s interval (~$((CYCLES * INTERVAL / 60)) min)..."
 lmtrade run --cycles "$CYCLES" --interval "$INTERVAL"
 

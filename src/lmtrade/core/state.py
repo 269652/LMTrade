@@ -79,7 +79,9 @@ CREATE TABLE IF NOT EXISTS option_positions (
     status        TEXT NOT NULL DEFAULT 'open',   -- open | closed
     exit_premium  REAL,
     closed_ts     REAL,
-    pnl           REAL
+    pnl           REAL,
+    tp_premium    REAL,               -- explicit take-profit level, set at open
+    sl_premium    REAL                -- explicit stop-loss level, set at open
 );
 CREATE TABLE IF NOT EXISTS news (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,7 +129,19 @@ class Store:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """In-place migrations for DBs created before schema additions
+        (CREATE TABLE IF NOT EXISTS won't add columns to existing tables —
+        the persisted bot-state DB outlives code changes)."""
+        cols = {r["name"] for r in
+                self._conn.execute("PRAGMA table_info(option_positions)")}
+        for col in ("tp_premium", "sl_premium"):
+            if col not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE option_positions ADD COLUMN {col} REAL")
 
     # -- meta -----------------------------------------------------------------
     def set_meta(self, key: str, value: Any) -> None:
@@ -269,13 +283,15 @@ class Store:
     def open_option(
         self, underlying: str, kind: str, strike: float, expiry_ts: float,
         iv: float, contracts: float, entry_premium: float, genome_id: str | None,
+        tp_premium: float | None = None, sl_premium: float | None = None,
     ) -> int:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO option_positions(underlying,kind,strike,expiry_ts,iv,"
-                "contracts,entry_premium,opened_ts,genome_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                "contracts,entry_premium,opened_ts,genome_id,tp_premium,sl_premium) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (underlying, kind, strike, expiry_ts, iv, contracts, entry_premium,
-                 time.time(), genome_id),
+                 time.time(), genome_id, tp_premium, sl_premium),
             )
             self._conn.commit()
             return int(cur.lastrowid)

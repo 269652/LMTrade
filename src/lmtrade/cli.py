@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -176,6 +177,81 @@ def deploy(
     burn = current_hourly_burn()
     if burn is not None:
         console.print(f"Current Vast.ai burn: [bold]${burn}/hr[/bold]")
+
+
+@app.command("import-news")
+def import_news(file: str = typer.Argument(..., help="JSON: [{symbol, text, sentiment?}]")):
+    """Import market news items into the bot's news store (used as trading
+    signals for up to 24h). Sentiment is parsed from the text if omitted."""
+    from .research.news import _parse_sentiment
+
+    path = Path(file)
+    try:
+        items = json.loads(path.read_text())
+        assert isinstance(items, list)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Invalid news file:[/red] {exc}")
+        raise typer.Exit(1)
+
+    settings = load_settings()
+    store = Store(settings.db_path)
+    count = 0
+    for item in items:
+        symbol = str(item.get("symbol", "")).strip()
+        text = str(item.get("text", "")).strip()
+        if not symbol or not text:
+            continue
+        sentiment = item.get("sentiment") or _parse_sentiment(text)
+        if sentiment not in ("bullish", "bearish", "neutral"):
+            sentiment = "neutral"
+        store.add_news(symbol, text[:1000], sentiment)
+        count += 1
+    store.add_activity("signal", f"imported {count} news items", detail={"file": file})
+    store.close()
+    console.print(f"[green]Imported {count} news items.[/green]")
+
+
+@app.command("import-analysis")
+def import_analysis(
+    file: str = typer.Argument(..., help='JSON: {"valid_hours": 24, "symbols": '
+                                         '{"AAPL": {"bias", "confidence", "notes"}}}')
+):
+    """Import the daily market analysis (compiled by Claude) — becomes a
+    weighted directional signal per symbol for the validity window."""
+    import time as _time
+
+    path = Path(file)
+    try:
+        data = json.loads(path.read_text())
+        symbols = data["symbols"]
+        assert isinstance(symbols, dict) and symbols
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Invalid analysis file:[/red] {exc}")
+        raise typer.Exit(1)
+
+    cleaned: dict = {}
+    for sym, entry in symbols.items():
+        bias = str(entry.get("bias", "")).lower()
+        if bias not in ("bullish", "bearish", "neutral"):
+            console.print(f"[red]Invalid bias for {sym}:[/red] {bias!r} "
+                          "(must be bullish|bearish|neutral)")
+            raise typer.Exit(1)
+        conf = max(0.0, min(1.0, float(entry.get("confidence", 0.5))))
+        cleaned[sym] = {"bias": bias, "confidence": conf,
+                        "notes": str(entry.get("notes", ""))[:500]}
+
+    settings = load_settings()
+    store = Store(settings.db_path)
+    store.set_meta("market_analysis", {
+        "ts": _time.time(),
+        "valid_hours": float(data.get("valid_hours", 24)),
+        "symbols": cleaned,
+    })
+    store.add_activity("insight", f"daily analysis imported for {len(cleaned)} symbols",
+                       detail=cleaned)
+    store.close()
+    console.print(f"[green]Analysis imported for {len(cleaned)} symbols "
+                  f"(valid {data.get('valid_hours', 24)}h).[/green]")
 
 
 @app.command()
