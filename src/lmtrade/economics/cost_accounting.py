@@ -16,6 +16,7 @@ USD. A single FX rate keeps the comparison honest without a market data call.
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 
@@ -41,6 +42,12 @@ class EconomicsSnapshot:
     reserve_eur: float = 0.0
 
     def as_dict(self) -> dict:
+        # gpu_usd_per_hour=0 (no GPU rented) makes runway_hours literally
+        # float('inf') — not valid JSON (Starlette's JSONResponse uses
+        # allow_nan=False per RFC 8259), so it's represented as None
+        # ("unlimited") here. The dataclass field itself stays the real
+        # float — CLI status formatting (f"{runway:.1f} h") handles inf fine.
+        runway = None if math.isinf(self.runway_hours) else round(self.runway_hours, 2)
         return {
             "net_worth_eur": round(self.net_worth_eur, 4),
             "net_worth_usd": round(self.net_worth_usd, 4),
@@ -48,7 +55,7 @@ class EconomicsSnapshot:
             "inference_cost_usd": round(self.inference_cost_usd, 6),
             "fees_eur": round(self.fees_eur, 4),
             "gpu_usd_per_hour": self.gpu_usd_per_hour,
-            "runway_hours": round(self.runway_hours, 2),
+            "runway_hours": runway,
             "self_sustaining": self.self_sustaining,
             "halt_trading": self.halt_trading,
             "pnl_eur": round(self.pnl_eur, 4),

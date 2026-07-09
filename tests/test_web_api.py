@@ -49,6 +49,34 @@ class TestExistingEndpoints:
             assert isinstance(r.json(), list)
 
 
+class TestInfiniteRunwayJsonSafety:
+    """gpu_usd_per_hour=0 (no GPU rented) makes runway_hours float('inf') —
+    Starlette's JSONResponse (allow_nan=False) crashes on that unless it's
+    converted before serialization. Regression test for a live crash."""
+
+    @pytest.fixture()
+    def zero_gpu_client(self, tmp_path: Path) -> TestClient:
+        s = Settings(mode="paper", budget=10.0, universe=["AAPL"],
+                     data={"provider": "synthetic"},
+                     economics={"gpu_usd_per_hour": 0.0})
+        s.model.stack = ["heuristic"]
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        engine = Engine(s, store, PaperBroker(store, starting_cash=10.0, fee=0.1))
+        engine.run_cycle()
+        store.close()
+        return TestClient(create_app(s))
+
+    def test_summary_is_json_safe(self, zero_gpu_client):
+        r = zero_gpu_client.get("/api/summary")
+        assert r.status_code == 200
+        assert r.json()["economics"]["runway_hours"] is None
+
+    def test_activity_is_json_safe(self, zero_gpu_client):
+        r = zero_gpu_client.get("/api/activity")
+        assert r.status_code == 200
+
+
 class TestNewEndpoints:
     def test_options_endpoint(self, client):
         r = client.get("/api/options")
