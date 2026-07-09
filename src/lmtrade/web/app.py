@@ -201,6 +201,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def news() -> JSONResponse:
         return SafeJSONResponse(store.recent_news(50))
 
+    @app.get("/api/analysis")
+    def analysis() -> JSONResponse:
+        """The latest compiled daily market analysis (per-symbol bias)."""
+        return SafeJSONResponse(store.get_meta("market_analysis", {}) or {})
+
+    @app.get("/api/signals")
+    def signals(min_confidence: float = 0.6, limit: int = 200) -> JSONResponse:
+        """Strongest recent decisions and their cause — the per-provider signal
+        breakdown recorded in each 'decision' activity. Deduped to the most
+        recent decision per symbol so the tab reads as 'current strong signals'."""
+        seen: set[str] = set()
+        out = []
+        for a in store.recent_activity(limit):
+            if a.get("kind") != "decision":
+                continue
+            d = a.get("detail") or {}
+            symbol = a.get("symbol")
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            if d.get("direction") in (None, "hold"):
+                continue
+            if float(d.get("confidence", 0.0)) < min_confidence:
+                continue
+            out.append({
+                "ts": a.get("ts"),
+                "symbol": symbol,
+                "direction": d.get("direction"),
+                "confidence": d.get("confidence"),
+                "rationale": d.get("rationale", ""),
+                "signals": d.get("signals", []),
+            })
+        out.sort(key=lambda r: r.get("confidence", 0), reverse=True)
+        return SafeJSONResponse(out)
+
     @app.get("/healthz")
     def healthz() -> dict:
         return {"ok": True}

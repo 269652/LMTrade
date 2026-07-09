@@ -13,15 +13,19 @@ function sideClass(s) { return s === "buy" ? "buy" : s === "sell" ? "sell" : "ho
 
 async function refresh() {
   try {
-    const [s, trades, activity, logs, equity, strategies, realized] = await Promise.all([
-      getJSON("/api/summary"),
-      getJSON("/api/trades?limit=100"),
-      getJSON("/api/activity?limit=100"),
-      getJSON("/api/logs?limit=200"),
-      getJSON("/api/equity"),
-      getJSON("/api/leaderboard"),
-      getJSON("/api/realized?limit=200"),
-    ]);
+    const [s, trades, activity, logs, equity, strategies, realized, signals, news, analysis] =
+      await Promise.all([
+        getJSON("/api/summary"),
+        getJSON("/api/trades?limit=100"),
+        getJSON("/api/activity?limit=100"),
+        getJSON("/api/logs?limit=200"),
+        getJSON("/api/equity"),
+        getJSON("/api/leaderboard"),
+        getJSON("/api/realized?limit=200"),
+        getJSON("/api/signals?min_confidence=0.6"),
+        getJSON("/api/news"),
+        getJSON("/api/analysis"),
+      ]);
     paintSummary(s);
     paintPositions(s.positions);
     paintTrades(trades);
@@ -30,6 +34,9 @@ async function refresh() {
     paintChart(equity);
     paintStrategies(strategies);
     paintRealized(realized);
+    paintSignals(signals);
+    paintNews(news);
+    paintAnalysis(analysis);
   } catch (e) {
     console.error(e);
   }
@@ -132,6 +139,50 @@ function paintLogs(rows) {
   ).join("") || `<div class="muted">No logs.</div>`;
 }
 
+function sentClass(s) {
+  return s === "bullish" ? "buy" : s === "bearish" ? "sell" : "hold";
+}
+
+function paintSignals(rows) {
+  $("signals").innerHTML = rows && rows.length
+    ? rows.map(r => {
+        const cause = (r.signals || [])
+          .filter(s => s.direction && s.direction !== "hold")
+          .map(s => `<span class="pill ${sideClass(s.direction)}">${s.provider} ${fmt(s.confidence)}</span> ${s.rationale || ""}`)
+          .join("<br>") || `<span class="muted">${r.rationale || "—"}</span>`;
+        return `<tr><td>${r.symbol}</td><td><span class="pill ${sideClass(r.direction)}">${r.direction}</span></td>`
+          + `<td>${fmt(r.confidence)}</td><td>${cause}</td></tr>`;
+      }).join("")
+    : `<tr><td colspan="4" class="muted">No strong signals right now (needs confidence ≥ 0.6).</td></tr>`;
+}
+
+function paintNews(rows) {
+  $("news").innerHTML = rows && rows.length
+    ? rows.map(n => `<tr><td>${n.ts ? time(n.ts) : "—"}</td><td>${n.symbol}</td>`
+        + `<td><span class="pill ${sentClass(n.sentiment)}">${n.sentiment || "—"}</span></td>`
+        + `<td>${(n.text || "").slice(0, 240)}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">No news yet.</td></tr>`;
+}
+
+function paintAnalysis(a) {
+  const syms = (a && a.symbols) || {};
+  const keys = Object.keys(syms);
+  const meta = $("analysis-meta");
+  if (a && a.ts) {
+    const age = ((Date.now() / 1000 - a.ts) / 3600).toFixed(1);
+    meta.textContent = `Compiled ${age}h ago · valid ${a.valid_hours || 24}h · ${keys.length} symbols`;
+  } else {
+    meta.textContent = "";
+  }
+  $("analysis").innerHTML = keys.length
+    ? keys.map(k => {
+        const v = syms[k] || {};
+        return `<tr><td>${k}</td><td><span class="pill ${sentClass(v.bias)}">${v.bias || "—"}</span></td>`
+          + `<td>${fmt(v.confidence)}</td><td class="muted">${v.notes || ""}</td></tr>`;
+      }).join("")
+    : `<tr><td colspan="4" class="muted">No daily analysis compiled yet.</td></tr>`;
+}
+
 function paintChart(curve) {
   const svg = $("chart");
   if (!curve || curve.length < 2) { svg.innerHTML = ""; return; }
@@ -156,7 +207,7 @@ document.querySelectorAll(".tab").forEach(tab => {
   tab.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
     tab.classList.add("active");
-    ["positions", "realized", "strategies", "trades", "activity", "logs"].forEach(name =>
+    ["positions", "realized", "signals", "news", "analysis", "strategies", "trades", "activity", "logs"].forEach(name =>
       $("tab-" + name).classList.toggle("hidden", name !== tab.dataset.tab));
   });
 });

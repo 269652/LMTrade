@@ -100,6 +100,9 @@
   <div class="tabs">
     <div class="tab active" data-tab="positions">Positions</div>
     <div class="tab" data-tab="realized">Realized</div>
+    <div class="tab" data-tab="signals">Signals</div>
+    <div class="tab" data-tab="news">News</div>
+    <div class="tab" data-tab="analysis">Analysis</div>
     <div class="tab" data-tab="strategies">Strategies</div>
     <div class="tab" data-tab="trades">Trades</div>
     <div class="tab" data-tab="activity">Activity</div>
@@ -114,6 +117,22 @@
   <section id="tab-realized" class="hidden">
     <table><thead><tr><th>Closed</th><th>Symbol</th><th>Type</th><th>ISIN</th><th>Entry</th><th>Exit</th><th>Realized P&amp;L</th></tr></thead>
       <tbody id="realized-rows"></tbody></table>
+  </section>
+
+  <section id="tab-signals" class="hidden">
+    <table><thead><tr><th>Symbol</th><th>Direction</th><th>Confidence</th><th>Cause (contributing signals)</th></tr></thead>
+      <tbody id="signals"></tbody></table>
+  </section>
+
+  <section id="tab-news" class="hidden">
+    <table><thead><tr><th>Time</th><th>Symbol</th><th>Sentiment</th><th>Headline</th></tr></thead>
+      <tbody id="news"></tbody></table>
+  </section>
+
+  <section id="tab-analysis" class="hidden">
+    <div id="analysis-meta" class="muted" style="margin:10px 0;"></div>
+    <table><thead><tr><th>Symbol</th><th>Bias</th><th>Confidence</th><th>Notes</th></tr></thead>
+      <tbody id="analysis"></tbody></table>
   </section>
 
   <section id="tab-strategies" class="hidden">

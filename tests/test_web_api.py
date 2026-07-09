@@ -120,6 +120,57 @@ class TestDashboardShell:
         assert isinstance(r.json(), list)
 
 
+class TestAnalysisEndpoint:
+    def test_analysis_returns_stored_market_analysis(self, tmp_path):
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        store.set_meta("market_analysis", {"valid_hours": 26, "ts": 1000.0,
+                       "symbols": {"AAPL": {"bias": "bullish", "confidence": 0.6}}})
+        store.close()
+        data = TestClient(create_app(s)).get("/api/analysis").json()
+        assert data["symbols"]["AAPL"]["bias"] == "bullish"
+
+    def test_analysis_empty_when_none(self, client):
+        assert client.get("/api/analysis").json() == {}
+
+
+class TestSignalsEndpoint:
+    """The Signals tab surfaces the strongest recent decisions and their
+    cause (the per-provider signal breakdown recorded in decision activity)."""
+
+    @pytest.fixture()
+    def signals_client(self, tmp_path: Path) -> TestClient:
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        store.add_activity("decision", "AAPL: BUY conf 0.90", "AAPL", {
+            "direction": "buy", "confidence": 0.9,
+            "signals": [{"provider": "heuristic", "direction": "buy",
+                         "confidence": 0.9, "rationale": "fast SMA above slow"}]})
+        store.add_activity("decision", "MSFT: HOLD conf 0.00", "MSFT", {
+            "direction": "hold", "confidence": 0.0, "signals": []})
+        store.add_activity("decision", "NVDA: SELL conf 0.30", "NVDA", {
+            "direction": "sell", "confidence": 0.3, "signals": []})
+        store.close()
+        return TestClient(create_app(s))
+
+    def test_only_strong_directional_signals(self, signals_client):
+        rows = signals_client.get("/api/signals?min_confidence=0.5").json()
+        syms = {r["symbol"] for r in rows}
+        assert "AAPL" in syms          # strong buy
+        assert "MSFT" not in syms      # hold excluded
+        assert "NVDA" not in syms      # below threshold
+
+    def test_signal_includes_cause(self, signals_client):
+        rows = signals_client.get("/api/signals?min_confidence=0.5").json()
+        aapl = next(r for r in rows if r["symbol"] == "AAPL")
+        assert aapl["direction"] == "buy"
+        assert any("SMA" in s["rationale"] for s in aapl["signals"])
+
+
 class TestRealizedPnl:
     """Closed options/knockouts carry realized P&L that had no home in the
     UI — only unrealized (open) P&L and equity trades were shown. The
