@@ -30,6 +30,17 @@ CLAUDE_CLI_BIN = "claude"
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
+# Keywords in Claude CLI stderr that indicate a subscription/token limit rather
+# than a transient error.  Checked case-insensitively.
+_LIMIT_KEYWORDS = ("usage limit", "rate limit", "overloaded", "exceeded", "quota",
+                   "credit", "billing", "subscription", "too many requests")
+
+
+class ProviderLimitError(RuntimeError):
+    """Raised when a provider reports a usage/token limit rather than a
+    transient error. NewsService catches this and stores a persistent warning
+    in the Store so the dashboard can surface a notification banner."""
+
 
 def _parse_decision(text: str, provider: str, cost: float) -> Signal:
     """Coerce a model's free-text answer into a Signal. Accepts JSON or falls
@@ -215,7 +226,11 @@ def _default_claude_cli_runner(prompt: str, timeout: float = CLAUDE_CLI_TIMEOUT)
         cmd, input=prompt, capture_output=True, text=True, timeout=timeout,
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"claude CLI exited {result.returncode}")
+        stderr = result.stderr.strip() or f"claude CLI exited {result.returncode}"
+        low = stderr.lower()
+        if any(kw in low for kw in _LIMIT_KEYWORDS):
+            raise ProviderLimitError(stderr)
+        raise RuntimeError(stderr)
     return result.stdout
 
 
@@ -264,17 +279,17 @@ class ClaudeCLIProvider(ModelProvider):
         )
         try:
             text = self._runner(prompt, self.timeout)
+        except ProviderLimitError:
+            # Re-raise so NewsService can persist a persistent warning banner
+            # in the store — the caller must distinguish "limit hit" from
+            # "transient error" to avoid crying wolf on every network hiccup.
+            raise
         except Exception as exc:  # noqa: BLE001
-            # Return empty (not error text) so a failed CLI call is *skipped*
-            # by NewsService rather than stored as a bogus "neutral" news item
-            # that then serves from cache for the whole freshness window. Log
-            # loudly so the failure is diagnosable instead of silent.
+            # Transient errors (network, timeout, interrupted) are logged and
+            # discarded — the symbol just gets no news this cycle.
             log.warning("claude CLI research failed for %s: %s", symbol, exc)
             return "", 0.0
         # A valid response MUST contain the SENTIMENT marker the prompt demands.
-        # Anything without it isn't research — it's CLI/shell noise (e.g. a
-        # Windows "Terminate batch job (Y/N)?" prompt captured when the process
-        # was interrupted). Skip it rather than store it as neutral news.
         if "sentiment" not in (text or "").lower():
             log.warning("claude CLI research for %s returned no SENTIMENT marker "
                         "(likely interrupted/error output) — skipping.", symbol)

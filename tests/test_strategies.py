@@ -146,3 +146,49 @@ class TestOptimizer:
         d, s = g.signal(rising())
         assert d in ("buy", "sell", "hold")
         assert 0.0 <= s <= 1.0
+
+
+class TestHotswapGenome:
+    """The hotswap strategy must appear in the registry, produce valid signals,
+    and be automatically injected into any existing population that lacks it."""
+
+    def test_hotswap_in_registry(self):
+        assert "hotswap" in STRATEGIES, (
+            "'hotswap' strategy must be registered in STRATEGIES"
+        )
+
+    def test_hotswap_signals_on_strong_uptrend(self):
+        """A clear fast uptrend must produce a 'buy' signal with high confidence."""
+        d, s = signal_for("hotswap", rising(), STRATEGIES["hotswap"].default_params)
+        assert d == "buy" and s > 0, (
+            "hotswap should buy on a strong uptrend"
+        )
+
+    def test_hotswap_holds_below_confidence_min(self):
+        """A flat series gives weak momentum; hotswap must hold when below confidence_min."""
+        d, s = signal_for("hotswap", flat(), STRATEGIES["hotswap"].default_params)
+        assert d == "hold", "hotswap must hold when trend is flat (no high-confidence signal)"
+
+    def test_hotswap_strength_bounded(self):
+        for series in (rising(), falling(), flat()):
+            _, s = signal_for("hotswap", series, STRATEGIES["hotswap"].default_params)
+            assert 0.0 <= s <= 1.0
+
+    def test_missing_strategy_injected_on_load(self, store):
+        """If genomes are stored without a 'hotswap' entry, the optimizer must inject one."""
+        # Seed with only the classic three strategies (no hotswap).
+        from lmtrade.strategies.optimizer import Genome
+        import uuid
+        legacy = [
+            Genome(id=uuid.uuid4().hex[:8], strategy=s, params={})
+            for s in ("momentum", "mean_reversion", "breakout")
+        ]
+        opt = StrategyOptimizer(store, population=3, rng=random.Random(42))
+        opt._save(legacy)
+
+        # Re-load: optimizer must detect the missing strategy and inject it.
+        opt2 = StrategyOptimizer(store, population=3, rng=random.Random(1))
+        strategies = {g.strategy for g in opt2.genomes()}
+        assert "hotswap" in strategies, (
+            "optimizer should inject a hotswap genome when the stored population lacks one"
+        )

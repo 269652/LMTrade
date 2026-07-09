@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 try:
     import tomllib  # stdlib, Python 3.11+
@@ -81,6 +81,13 @@ class EconomicsConfig(BaseModel):
     # being re-risked.
     profit_stash_pct: float = 0.0
 
+    @field_validator("profit_stash_pct")
+    @classmethod
+    def normalise_stash_pct(cls, v: float) -> float:
+        """Accept either fraction (0.30) or integer percent (30) for 30%.
+        Values > 1 are treated as percentages and divided by 100."""
+        return v / 100.0 if v > 1.0 else v
+
 
 class LoopConfig(BaseModel):
     interval_seconds: int = 60
@@ -90,6 +97,22 @@ class LoopConfig(BaseModel):
     # hourly cycle count. 0 = no extra cap (fill up to remaining slots, the
     # historical behavior).
     max_new_positions_per_cycle: int = 0
+    # Experimental hotswap: when the book is full and a high-confidence signal
+    # arrives, close the open position with the smallest current loss (the
+    # "cheapest exit") to free a slot, then open the new position.
+    # Only fires when the majority of open positions are in the red AND the
+    # incoming signal meets the stricter hotswap_min_confidence threshold.
+    hotswap_enabled: bool = True
+    hotswap_min_confidence: float = 0.80    # stricter than normal min_confidence
+    hotswap_red_majority_pct: float = 0.60  # fraction of book that must be losing
+    # Stale eviction: close positions that have been sideways for too long to
+    # free a slot for a stronger incoming signal.  A position is "stale" when
+    # it has been held for at least stale_hours AND its unrealised P&L is still
+    # below stale_max_profit_pct (e.g. flat or slightly negative).  Big winners
+    # are never evicted — only dead weight is cleaned up.
+    stale_evict_enabled: bool = True
+    stale_hours: float = 48.0              # minimum hold time before stale check
+    stale_max_profit_pct: float = 0.10     # evict if pnl% < this (< 10% gain)
 
 
 class ResearchConfig(BaseModel):
@@ -127,6 +150,18 @@ class OptionsConfig(BaseModel):
     max_hold_hours: float = 0.0        # force-close after this many hours
                                        # regardless of TP/SL (0 = disabled,
                                        # relies on expiry_days instead)
+    # Cash reserve: keep at least this fraction of net worth in cash rather
+    # than deploying everything into positions.  As the portfolio grows the
+    # deployable bucket grows proportionally, so larger positions are
+    # automatically available without any manual configuration change.
+    # Accepts either a fraction (0.40) or an integer percent (40 → 0.40).
+    cash_reserve_pct: float = 0.40
+
+    @field_validator("cash_reserve_pct")
+    @classmethod
+    def normalise_cash_reserve_pct(cls, v: float) -> float:
+        """Accept either fraction (0.40) or integer percent (40) for 40%."""
+        return v / 100.0 if v > 1.0 else v
 
 
 class LearningConfig(BaseModel):

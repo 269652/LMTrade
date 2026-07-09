@@ -56,6 +56,10 @@
                  border:1px solid var(--line); }
   .econ-ok { background:rgba(63,185,80,.08); border-color:var(--green); }
   .econ-warn { background:rgba(210,153,34,.08); border-color:var(--amber); }
+  .provider-warning-banner { display:none; margin-top:10px; padding:10px 16px; border-radius:10px;
+                              font-size:13px; background:rgba(210,100,34,.12);
+                              border:1px solid var(--red); color:var(--text); }
+  .provider-warning-banner.show { display:block; }
   .muted { color:var(--muted); }
   .num.pos { color:var(--green); } .num.neg { color:var(--red); }
   svg#chart { width:100%; height:120px; }
@@ -104,11 +108,16 @@
             border-left:1px solid var(--line); }
   .guard2.show { display:inline-flex; }
   .guard2 label { color:var(--amber); }
+  .restart-overlay { position:fixed; inset:0; background:rgba(0,0,0,.78); z-index:100;
+                     display:flex; align-items:center; justify-content:center;
+                     flex-direction:column; gap:16px; }
+  .restart-overlay .r-title { font-size:22px; font-weight:700; color:var(--text); }
+  .restart-overlay .r-sub   { font-size:13px; color:var(--muted); }
 </style>
 </head>
 <body>
 <header>
-  <h1>⚡ LMTrade</h1>
+  <h1>Claude Stonks 🤑</h1>
   <span id="mode" class="badge paper" title="Click to switch paper / live">paper</span>
   <span id="armwrap" class="armwrap">
     <label title="Arm real Trade Republic order execution">
@@ -149,6 +158,7 @@
 <main>
   <div id="exec-banner" class="exec-banner"><span class="ic" id="exec-ic"></span><span id="exec-text"></span></div>
   <div id="econ" class="econ-banner econ-ok">loading economics…</div>
+  <div id="provider-warning-banner" class="provider-warning-banner"></div>
 
   <div class="grid" style="margin-top:16px;">
     <div class="card"><div class="k">Net Worth</div><div class="v" id="net">—</div><div class="sub" id="pnl">—</div></div>
@@ -156,7 +166,6 @@
     <div class="card"><div class="k">Reserved</div><div class="v" id="reserve">—</div><div class="sub">stashed profit (protected)</div></div>
     <div class="card"><div class="k">Positions</div><div class="v" id="npos">—</div><div class="sub">open</div></div>
     <div class="card"><div class="k">Realized P&amp;L</div><div class="v" id="realized">—</div><div class="sub" id="realized-sub">closed trades</div></div>
-    <div class="card" id="trcash-card"><div class="k">TR Account Cash</div><div class="v" id="trcash">—</div><div class="sub">live Trade Republic balance</div></div>
   </div>
 
   <section>

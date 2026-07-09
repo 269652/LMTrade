@@ -65,11 +65,24 @@ cp data/lmtrade.db "$WORKTREE_DIR/$STATE_FILE"
 
 # Diffable trade ledger — reviewable via git history, unlike the opaque
 # SQLite file. Incremental: only appends trades not yet exported.
+LEDGER_BEFORE=$(wc -l < "$WORKTREE_DIR/$LEDGER_FILE" 2>/dev/null || echo 0)
 lmtrade export-ledger "$WORKTREE_DIR/$LEDGER_FILE"
+LEDGER_AFTER=$(wc -l < "$WORKTREE_DIR/$LEDGER_FILE" 2>/dev/null || echo 0)
+
+# Regenerate the dashboard screenshot whenever new orders were realized.
+# The PNG is committed to the bot-state branch and the README links to it,
+# so the repo's front page always shows the latest real trading state.
+if [ "$LEDGER_AFTER" -gt "$LEDGER_BEFORE" ]; then
+    echo "==> New orders realized — updating dashboard screenshot..."
+    MPLBACKEND=Agg lmtrade viz --out "$WORKTREE_DIR/state/dashboard.png" || \
+        echo "==> Warning: dashboard screenshot failed (non-fatal)"
+fi
 
 (
     cd "$WORKTREE_DIR"
     git add "$STATE_FILE" "$LEDGER_FILE"
+    # Include the screenshot if it was (re)generated this run.
+    [ -f "state/dashboard.png" ] && git add "state/dashboard.png"
     if git diff --cached --quiet; then
         echo "==> No state changes to commit"
     else

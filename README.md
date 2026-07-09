@@ -1,6 +1,9 @@
 # ⚡ LMTrade
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/269652/LMTrade/blob/claude/trading-bot-hybrid-agent-tvs90n/notebooks/LMTrade_Colab.ipynb)
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
+
+![Paper trading dashboard](https://raw.githubusercontent.com/269652/LMTrade/bot-state/state/dashboard.png)
 
 A **self-sustaining trading bot** that fuses **LLMs, SLMs and classical financial
 models** into one decision, and is designed to **pay for its own GPU costs**.
@@ -96,6 +99,164 @@ Optional model providers:
 ```bash
 cp .env.example .env              # add OLLAMA_HOST, ANTHROPIC_API_KEY, PERPLEXITY_API_KEY…
 ```
+
+## Local installation
+
+### Prerequisites
+
+| Requirement | Notes |
+|-------------|-------|
+| **Python 3.10+** | 3.11+ recommended (ships `tomllib`) |
+| **Git** | clone + the `bot-state` branch |
+| **pip** | any recent version |
+
+### 1 — Clone and install
+
+```bash
+git clone https://github.com/269652/LMTrade.git
+cd LMTrade
+pip install -e '.[dev]'    # installs lmtrade + pytest/ruff for local dev
+```
+
+Paper mode with synthetic data needs nothing else — run it right away:
+
+```bash
+lmtrade run --cycles 5 --interval 1   # fully offline
+lmtrade web                            # → http://localhost:8000
+```
+
+### 2 — Copy and edit the config files
+
+```bash
+cp .env.example .env              # secrets — gitignored, never committed
+cp config.example.toml config.toml    # non-secret settings — gitignored
+```
+
+Edit `.env` with the providers you want to enable (all optional, see below).
+`lmtrade config` prints the fully resolved settings so you can confirm what took effect.
+
+### 3 — Optional providers
+
+#### Claude subscription (recommended — fully local, no API key)
+
+Install the [Claude CLI](https://claude.ai/code) and log in once:
+
+```bash
+# macOS / Linux
+curl -fsSL https://claude.ai/install.sh | sh
+claude auth login          # one-time browser login
+
+# Windows — use the installer at https://claude.ai/code
+```
+
+Then tell LMTrade to use it in `config.toml`:
+
+```toml
+[model]
+stack = ["heuristic", "slm", "claude_cli"]
+[research]
+news_provider    = "claude_cli"
+analysis_provider = "claude_cli"
+```
+
+All LLM calls (news, daily analysis, trading decisions) now go through your
+Claude subscription — no `ANTHROPIC_API_KEY` or `PERPLEXITY_API_KEY` needed.
+
+#### Anthropic / Perplexity API keys
+
+For cloud LLM and web-search-grounded news without the local CLI:
+
+```bash
+# in .env
+ANTHROPIC_API_KEY=sk-ant-...
+PERPLEXITY_API_KEY=pplx-...
+```
+
+#### Local SLM via Ollama
+
+```bash
+# macOS / Linux
+curl -fsSL https://ollama.ai/install.sh | sh
+ollama pull qwen2.5:1.5b          # T4-sized model (~1 GB)
+# For an A100:  ollama pull qwen2.5:7b
+
+# Windows — download the installer at https://ollama.ai
+```
+
+Add to `.env`:
+
+```bash
+OLLAMA_HOST=http://localhost:11434
+LMTRADE_SLM_MODEL=qwen2.5:1.5b
+```
+
+#### Trade Republic (paper trading on real instruments)
+
+With TR credentials the bot selects **real TR knockout certificates** (real
+ISINs, real barrier pricing) for its paper trades — **no orders are ever
+placed**. This is optional; without credentials you get synthetic Black-Scholes
+options instead.
+
+1. Install the extra:
+   ```bash
+   pip install 'lmtrade[traderepublic]'
+   ```
+2. Add to `.env`:
+   ```bash
+   TR_PHONE=+49123456789   # your TR account phone number (exact format matters)
+   TR_PIN=1234             # your TR app PIN (4 digits)
+   ```
+3. Run the **one-time 2FA pairing** (only needed once per machine):
+   ```bash
+   pytr login -n "+49123456789" -p "1234" --store_credentials
+   ```
+   > **Important:** The phone number here must match `TR_PHONE` in `.env`
+   > **character for character** — `pytr` names the session cookie file after it.
+   > A spacing or prefix mismatch silently breaks session resumption every time
+   > the bot starts. `--store_credentials` is mandatory; without it `pytr`
+   > completes the 2FA for that one process and writes nothing to disk.
+4. Enable real instruments in `config.toml`:
+   ```toml
+   [tr]
+   use_derivatives = true
+   ```
+
+> ⚠️ **Live execution** (real orders) is an entirely separate, guarded opt-in
+> beyond this. Read [`docs/TRADE_REPUBLIC.md`](docs/TRADE_REPUBLIC.md) before
+> considering it — it requires removing a deliberate code guard and is against
+> TR's Terms of Service.
+
+#### Vast.ai GPU (run the SLM 24/7)
+
+```bash
+# in .env
+VAST_API_KEY=your-key
+
+lmtrade deploy              # shows the current cheapest GPU offers
+GPU=RTX_3090 bash scripts/deploy_vast.sh
+```
+
+The deploy script provisions the box, installs Ollama, pulls the SLM, and
+launches both the engine and dashboard. Copy your `.env` to the instance
+out-of-band — **never bake secrets into the image**.
+
+### 4 — Verify
+
+```bash
+python -m pytest            # full suite must be green
+lmtrade config              # shows the fully resolved settings
+lmtrade status              # portfolio + economics snapshot
+lmtrade web                 # → http://localhost:8000
+```
+
+### 5 — Running permanently
+
+> **Quickest path:** say **"Setup the project"** in a [Claude Code](https://claude.ai/code)
+> session pointed at this repo — the guided flow asks all your settings, writes
+> both config files, installs, runs the test suite, and offers to set up the
+> permanent hourly Routine for you.
+
+See the [**Running permanently**](#running-permanently-hourly-claude-routine) section below.
 
 ## Run on Google Colab
 
@@ -257,4 +418,9 @@ proportionally more P&L before the bot counts as self-sustaining.
 
 ## License
 
-MIT
+[Creative Commons Attribution-NonCommercial 4.0 International](LICENSE) (CC BY-NC 4.0)
+
+**Free for personal, educational, and research use. Commercial use is not permitted.**
+
+You may share and adapt this work with attribution; you may not use it for
+commercial purposes. See the [`LICENSE`](LICENSE) file for the full terms.

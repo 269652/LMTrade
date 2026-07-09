@@ -207,6 +207,35 @@ def rel_value(history: list[float], p: dict, ctx: dict | None = None) -> tuple[s
     return "hold", 0.0
 
 
+def hotswap(history: list[float], p: dict, ctx: dict | None = None) -> tuple[str, float]:
+    """High-confidence momentum strategy designed for hotswap eviction entries.
+
+    Only signals when momentum is both present AND exceeds confidence_min,
+    so a 'buy' from this strategy is a genuine strong conviction trade —
+    the kind that justifies evicting an existing red position to make room.
+    """
+    fast = int(p.get("fast", 5))
+    slow = int(p.get("slow", 20))
+    threshold = float(p.get("threshold", 0.003))
+    confidence_min = float(p.get("confidence_min", 0.65))
+    if len(history) < slow + 1:
+        return "hold", 0.0
+    f = sum(history[-fast:]) / fast
+    s = sum(history[-slow:]) / slow
+    if s <= 0:
+        return "hold", 0.0
+    spread = (f - s) / s
+    if spread > threshold:
+        strength = _clip01(spread / (threshold * 10))
+        if strength >= confidence_min:
+            return "buy", strength
+    if spread < -threshold:
+        strength = _clip01(-spread / (threshold * 10))
+        if strength >= confidence_min:
+            return "sell", strength
+    return "hold", 0.0
+
+
 STRATEGIES: dict[str, StrategySpec] = {
     "momentum": StrategySpec(
         "momentum", momentum,
@@ -244,6 +273,13 @@ STRATEGIES: dict[str, StrategySpec] = {
         "rel_value", rel_value,
         default_params={"window": 20, "z_entry": 1.5},
         bounds={"window": (10, 40), "z_entry": (1.0, 3.0)},
+    ),
+    "hotswap": StrategySpec(
+        "hotswap", hotswap,
+        default_params={"fast": 5, "slow": 20, "threshold": 0.003,
+                        "confidence_min": 0.65},
+        bounds={"fast": (3, 10), "slow": (10, 40),
+                "threshold": (0.001, 0.01), "confidence_min": (0.5, 0.9)},
     ),
 }
 

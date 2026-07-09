@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Self-sustaining trading bot fusing LLMs, SLMs and financial models, designed to pay for its own GPU costs."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "CC-BY-NC-4.0" }
 authors = [{ name = "LMTrade" }]
 dependencies = [
     "typer>=0.12",

@@ -145,6 +145,42 @@ class Engine:
             }
         self.store.set_meta("open_option_marks", marks)
 
+    def _hotswap_candidate(self, prices: dict[str, float]) -> dict | None:
+        """Return the cheapest-to-exit losing position, or None when hotswap
+        conditions are not met.
+
+        Hotswap fires when >= `hotswap_red_majority_pct` of open positions
+        have negative unrealised P&L. Uses marks cached by the current cycle's
+        `_persist_option_marks` call; for positions without a fresh price falls
+        back to assuming mark = 0 (total-loss estimate — conservative but safe).
+
+        Returns the red position with the *highest* unrealised P&L (i.e. the
+        smallest absolute loss), which is the cheapest exit.
+        """
+        open_opts = self.store.open_options()
+        if not open_opts:
+            return None
+        cached = self.store.get_meta("open_option_marks") or {}
+
+        pnl_map: dict[int, float] = {}
+        for o in open_opts:
+            entry = cached.get(str(o["id"]))
+            if entry is not None:
+                pnl_map[o["id"]] = float(entry["unrealized_pnl"])
+            else:
+                # No price data this cycle — worst-case: mark = 0.
+                pnl_map[o["id"]] = -(float(o["entry_premium"]) * float(o["contracts"]))
+
+        red_count = sum(1 for v in pnl_map.values() if v < 0)
+        if red_count == 0:
+            return None
+        if red_count / len(open_opts) < self.settings.loop.hotswap_red_majority_pct:
+            return None
+
+        red_opts = [o for o in open_opts if pnl_map[o["id"]] < 0]
+        # max = highest (least negative) pnl = smallest absolute loss
+        return max(red_opts, key=lambda o: pnl_map[o["id"]])
+
     # ------------------------------------------------------------ research jobs
     def _run_scheduled_jobs(self) -> None:
         # The news pass fires on the (shorter) retry cadence; get()/get_many
@@ -303,6 +339,53 @@ class Engine:
                 o["underlying"], {"pnl": pnl})
             self._record_learning(o.get("genome_id"), pnl)
 
+        # Stale eviction: close positions that have been sideways for too long
+        # to free a slot for a stronger incoming signal.  Runs after the normal
+        # TP/SL/expiry loop so already-closed options are never double-processed
+        # (close_option removes them from open_options()).  Only fires on
+        # positions older than stale_hours with pnl below stale_max_profit_pct —
+        # winners are always held; the normal SL cuts big losers; only dead-
+        # weight "stuck" positions are cleaned up here.
+        if self.settings.loop.stale_evict_enabled:
+            stale_h = self.settings.loop.stale_hours
+            max_profit = self.settings.loop.stale_max_profit_pct
+            now = self.now()
+            for o in list(self.store.open_options()):
+                spot = prices.get(o["underlying"])
+                if spot is None:
+                    continue
+                age_h = (now - o["opened_ts"]) / 3600.0
+                if age_h < stale_h:
+                    continue
+                entry = max(1e-9, float(o["entry_premium"]))
+                mark = self._mark_position(o, spot)
+                pnl_pct = (mark - entry) / entry
+                if pnl_pct >= max_profit:
+                    continue   # winning position — don't evict
+                contracts = float(o["contracts"])
+                pnl = (mark - entry) * contracts - OPTION_FEE
+                proceeds = max(0.0, mark * contracts - OPTION_FEE)
+                self.broker.adjust_cash(proceeds)
+                self.store.record_cost("fee", OPTION_FEE, "options")
+                self.store.close_option(o["id"], mark, pnl)
+                stash_pct = self.settings.economics.profit_stash_pct
+                if pnl > 0 and stash_pct > 0:
+                    stash = pnl * stash_pct
+                    if self.broker.adjust_cash(-stash):
+                        self.store.add_reserve(stash)
+                self.store.record_trade(Trade(
+                    o["underlying"], "sell", contracts, mark, OPTION_FEE,
+                    self.broker.mode,
+                    f"close {o['kind']} — stale ({age_h:.0f}h, {pnl_pct:+.1%}): "
+                    "freeing slot for stronger signal",
+                    None))
+                self.bus.activity(
+                    "trade",
+                    f"STALE CLOSE {o['kind'].upper()} {o['underlying']} "
+                    f"age={age_h:.0f}h pnl={pnl_pct:+.1%} → freed slot",
+                    o["underlying"], {"pnl": round(pnl, 4), "stale": True})
+                self._record_learning(o.get("genome_id"), pnl)
+
     def _record_learning(self, genome_id: str | None, pnl: float) -> None:
         if not (self.optimizer and genome_id):
             return
@@ -373,12 +456,22 @@ class Engine:
         """Premium budget for a new position, layering the quant sizing rules:
         fractional Kelly from the genome's empirical edge (when proven),
         volatility targeting, and the storm-regime haircut. Falls back to the
-        plain confidence-scaled fraction when there isn't enough data."""
+        plain confidence-scaled fraction when there isn't enough data.
+
+        The cash reserve cap (options.cash_reserve_pct) further limits the
+        budget: at most (1 - reserve_pct) of current equity may be deployed in
+        open positions at any time. As the portfolio grows the deployable bucket
+        grows proportionally, so the engine automatically uses larger positions
+        after profitable runs without any manual parameter changes."""
         cfg = self.settings.options
         s = self.settings.sizing
         cash = self.broker.cash()
-        equity = cash + self._positions_value({quote.symbol: quote.price}) \
-            + self._options_value({quote.symbol: quote.price})
+        # Use all last-known prices for a portfolio-wide equity estimate,
+        # not just the current quote — options on OTHER symbols have value too.
+        all_prices = {**self._last_good_price, quote.symbol: quote.price}
+        positions_value = self._positions_value(all_prices)
+        options_value = self._options_value(all_prices)
+        equity = cash + positions_value + options_value
 
         fraction = cfg.max_option_fraction * decision.confidence
         g = self._genome_stats(genome_id)
@@ -390,7 +483,15 @@ class Engine:
         fraction *= vol_scale(quote.history, s.vol_target_annual)
         if s.regime_filter_enabled and regime(quote.history) == "storm":
             fraction *= s.storm_size_factor
-        return min(fraction * equity, cash - OPTION_FEE)
+
+        # Cash reserve: cap the budget so total deployed capital never exceeds
+        # (1 - cash_reserve_pct) * equity.  Already-deployed capital is
+        # subtracted first; the remainder is available for this new position.
+        deployed = positions_value + options_value
+        max_deployable = equity * (1.0 - cfg.cash_reserve_pct)
+        available = max(0.0, max_deployable - deployed)
+
+        return min(fraction * equity, available, cash - OPTION_FEE)
 
     def _enter_knockout(self, quote: Quote, decision: Decision,
                         genome_id: str | None) -> bool:
@@ -635,6 +736,38 @@ class Engine:
                     f"position book full ({open_count}/{self.settings.loop.max_positions}) "
                     f"— no free slots, holding existing positions this cycle",
                     source="engine")
+                # Experimental hotswap: when the majority of open positions are
+                # losing money, close the cheapest loser to make room for a
+                # potentially stronger entry this cycle.
+                if self.settings.loop.hotswap_enabled:
+                    evict = self._hotswap_candidate(prices)
+                    if evict is not None:
+                        spot = prices.get(evict["underlying"], 0.0)
+                        mark = self._mark_position(evict, spot) if spot > 0 else 0.0
+                        entry = float(evict["entry_premium"])
+                        contracts = float(evict["contracts"])
+                        pnl = (mark - entry) * contracts - OPTION_FEE
+                        proceeds = max(0.0, mark * contracts - OPTION_FEE)
+                        self.broker.adjust_cash(proceeds)
+                        self.store.record_cost("fee", OPTION_FEE, "options")
+                        self.store.close_option(evict["id"], mark, pnl)
+                        stash_pct = self.settings.economics.profit_stash_pct
+                        if pnl > 0 and stash_pct > 0:
+                            stash = pnl * stash_pct
+                            if self.broker.adjust_cash(-stash):
+                                self.store.add_reserve(stash)
+                        self.store.record_trade(Trade(
+                            evict["underlying"], "sell", contracts, mark, OPTION_FEE,
+                            self.broker.mode,
+                            f"close {evict['kind']} — hotswap: freed slot for stronger entry",
+                            None))
+                        self.bus.activity(
+                            "trade",
+                            f"HOTSWAP CLOSE {evict['kind'].upper()} {evict['underlying']} "
+                            f"pnl {pnl:+.3f} — replaced by stronger signal",
+                            evict["underlying"], {"pnl": round(pnl, 4), "hotswap": True})
+                        self._record_learning(evict.get("genome_id"), pnl)
+                        slots = 1
             candidates: list[tuple[Decision, str | None]] = []
             for symbol in self.settings.universe:
                 if slots <= 0:

@@ -13,7 +13,7 @@ from typing import Callable
 
 from ..config import Settings, secret
 from ..core.state import Store
-from ..models.providers import ClaudeCLIProvider, PerplexityProvider
+from ..models.providers import ClaudeCLIProvider, PerplexityProvider, ProviderLimitError
 
 # fetcher(symbol) -> (text, cost_usd)
 Fetcher = Callable[[str], tuple[str, float]]
@@ -73,6 +73,17 @@ class NewsService:
             return fallback
         try:
             text, cost = self.fetcher(symbol)
+        except ProviderLimitError as exc:
+            # Subscription / token limit: persist a dashboard warning banner
+            # so the user knows immediately rather than wondering why news
+            # stopped updating. Unlike a transient error, this persists until
+            # explicitly dismissed or overwritten by a successful fetch.
+            self.store.set_meta("provider_warnings", {
+                "msg": str(exc) or "Claude CLI usage limit reached",
+                "provider": "claude_cli",
+                "ts": time.time(),
+            })
+            return fallback
         except Exception:  # noqa: BLE001 — news must never take down the engine
             return fallback
         if not text:

@@ -241,3 +241,332 @@ class TestBookFullVisibility:
         engine.run_cycle()
         logs = " ".join(l["message"] for l in store.recent_logs(50)).lower()
         assert "no free slot" not in logs
+
+
+class TestHotswap:
+    """Experimental hotswap: when the book is full and the majority of open
+    positions are in the red, the engine closes the position with the smallest
+    absolute loss to free one slot, then lets normal signal logic decide the
+    replacement entry.  The evicted position is always the 'least bad' loser
+    to minimise realised damage."""
+
+    _SHORT_EXPIRY = time.time() + 7 * 86_400   # 7 days: deep-OTM mark ≈ 0
+
+    def _loser(self, store, symbol, contracts=1.0, entry=1.0):
+        """Deep-OTM short-expiry call: Black-Scholes mark ≈ 0 → red.
+        sl=0.0 prevents _manage_options from exiting via stop-loss."""
+        return store.open_option(
+            symbol, "call", strike=1_000_000.0,
+            expiry_ts=self._SHORT_EXPIRY,
+            iv=0.2, contracts=contracts, entry_premium=entry,
+            genome_id=None, tp_premium=1e9, sl_premium=0.0,
+        )
+
+    def _winner(self, store, symbol, contracts=1.0, entry=0.01):
+        """Deep-ITM short-expiry call: mark ≈ spot ≈ 1 >> entry → green.
+        tp=1e9 / sl=0 prevent _manage_options exits."""
+        return store.open_option(
+            symbol, "call", strike=0.001,
+            expiry_ts=self._SHORT_EXPIRY,
+            iv=0.2, contracts=contracts, entry_premium=entry,
+            genome_id=None, tp_premium=1e9, sl_premium=0.0,
+        )
+
+    def test_hotswap_fires_when_book_full_and_majority_red(self, settings, store):
+        """Full book of losers → engine hotswaps one out and records it."""
+        # Two deep-OTM AAPL calls fill both slots; AAPL is in the universe so
+        # _persist_option_marks will compute their near-zero marks this cycle.
+        settings.loop.max_positions = 2
+        settings.loop.hotswap_enabled = True
+        settings.loop.hotswap_min_confidence = 0.50
+        settings.loop.hotswap_red_majority_pct = 0.50
+        # Block normal TP/SL exits so the positions survive to the hotswap check.
+        settings.options.min_hold_hours = 1000.0
+        id0 = self._loser(store, "AAPL")
+        id1 = self._loser(store, "AAPL")
+        loser_ids = {id0, id1}
+
+        make_engine(settings, store).run_cycle()
+
+        closed_ids = {o["id"] for o in store.closed_options()}
+        assert closed_ids & loser_ids, "expected at least one loser to be hotswapped out"
+        activity = " ".join(a["summary"] for a in store.recent_activity(50)).lower()
+        assert "hotswap" in activity
+
+    def test_hotswap_does_not_fire_when_majority_green(self, settings, store):
+        """Full book of winners → hotswap must NOT kick in."""
+        settings.loop.max_positions = 2
+        settings.loop.hotswap_enabled = True
+        settings.loop.hotswap_min_confidence = 0.50
+        settings.loop.hotswap_red_majority_pct = 0.60
+        # Two deep-ITM AAPL calls — mark >> entry → pnl > 0 → green.
+        self._winner(store, "AAPL")
+        self._winner(store, "AAPL")
+
+        make_engine(settings, store).run_cycle()
+
+        activity = " ".join(a["summary"] for a in store.recent_activity(50)).lower()
+        assert "hotswap" not in activity
+
+    def test_hotswap_disabled_by_config(self, settings, store):
+        """hotswap_enabled=False suppresses hotswap even when conditions are met."""
+        settings.loop.max_positions = 2
+        settings.loop.hotswap_enabled = False
+        settings.loop.hotswap_red_majority_pct = 0.50
+        settings.options.min_hold_hours = 1000.0
+        self._loser(store, "AAPL")
+        self._loser(store, "AAPL")
+
+        make_engine(settings, store).run_cycle()
+
+        activity = " ".join(a["summary"] for a in store.recent_activity(50)).lower()
+        assert "hotswap" not in activity
+
+    def test_hotswap_not_triggered_when_book_not_full(self, settings, store):
+        """Free slots available → normal entry path, no hotswap."""
+        settings.loop.max_positions = 4
+        settings.loop.hotswap_enabled = True
+        settings.loop.hotswap_red_majority_pct = 0.50
+        settings.options.min_hold_hours = 1000.0
+        self._loser(store, "AAPL")   # 1 of 4 slots — still 3 free
+
+        make_engine(settings, store).run_cycle()
+
+        activity = " ".join(a["summary"] for a in store.recent_activity(50)).lower()
+        assert "hotswap" not in activity
+
+    def test_hotswap_evicts_smallest_loss_not_biggest(self, settings, store):
+        """Among two red positions the one with the smaller absolute loss is
+        evicted first (cheapest exit, minimises realised damage)."""
+        settings.universe = ["AAPL", "MSFT"]   # both get synthetic prices
+        settings.loop.max_positions = 2
+        settings.loop.hotswap_enabled = True
+        settings.loop.hotswap_min_confidence = 0.50
+        settings.loop.hotswap_red_majority_pct = 0.50
+        settings.options.min_hold_hours = 1000.0
+
+        # Big loser on AAPL: 2 contracts × entry 1.0 → estimated loss ≈ −2.0
+        big_id = self._loser(store, "AAPL", contracts=2.0, entry=1.0)
+        # Small loser on MSFT: 1 contract × entry 0.5 → estimated loss ≈ −0.5
+        small_id = self._loser(store, "MSFT", contracts=1.0, entry=0.5)
+
+        make_engine(settings, store).run_cycle()
+
+        closed = store.closed_options()
+        # Identify which of our two planted losers were closed this cycle.
+        planted_closed = [o for o in closed if o["underlying"] in ("AAPL", "MSFT")
+                          and o["id"] in (big_id, small_id)]
+        assert planted_closed, "expected at least one planted loser to be hotswapped"
+        if len(planted_closed) == 1:
+            assert planted_closed[0]["underlying"] == "MSFT", (
+                "hotswap must evict the smallest-loss position first (MSFT, loss≈−0.5)"
+            )
+
+
+class TestProfitStash:
+    """Regression: profit_stash_pct saves to config.toml as an integer percent (e.g. 30)
+    but the engine treats it as a fraction (0-1). A value of 30 causes
+    stash = pnl * 30, which always exceeds available cash, so adjust_cash
+    silently returns False and the reserve never grows.
+    Fix: normalise any value > 1 as a percentage at config load time."""
+
+    def test_stash_pct_integer_percent_normalised_to_fraction(self):
+        """EconomicsConfig(profit_stash_pct=30) must behave as 0.30, not 30.0."""
+        from lmtrade.config import EconomicsConfig
+        cfg = EconomicsConfig(profit_stash_pct=30)
+        assert cfg.profit_stash_pct == pytest.approx(0.30), (
+            "profit_stash_pct=30 should be normalised to 0.30 (30%)"
+        )
+
+    def test_stash_pct_fraction_unchanged(self):
+        """A fractional value (0 <= v <= 1) must not be modified."""
+        from lmtrade.config import EconomicsConfig
+        assert EconomicsConfig(profit_stash_pct=0.3).profit_stash_pct == pytest.approx(0.3)
+        assert EconomicsConfig(profit_stash_pct=0.0).profit_stash_pct == pytest.approx(0.0)
+        assert EconomicsConfig(profit_stash_pct=1.0).profit_stash_pct == pytest.approx(1.0)
+
+    def test_profitable_close_increases_reserve(self, settings, store):
+        """Closing a winning position with profit_stash_pct=0.3 must add to reserve."""
+        settings.economics.profit_stash_pct = 0.3
+        settings.options.min_hold_hours = 0.0
+        # Deep-ITM call: mark >> entry -> TP fires immediately, pnl >> 0.
+        store.open_option(
+            "AAPL", "call", strike=0.001, expiry_ts=time.time() + 7 * 86400,
+            iv=0.2, contracts=1.0, entry_premium=0.01,
+            genome_id=None, tp_premium=0.02, sl_premium=0.0,
+        )
+        engine = make_engine(settings, store)
+        engine.run_cycle()
+        assert store.closed_options_count() >= 1, "deep-ITM option should have been closed"
+        assert store.reserve_balance() > 0, (
+            "reserve must increase after a profitable close with profit_stash_pct=0.3"
+        )
+
+    def test_no_reserve_increase_on_losing_close(self, settings, store):
+        """Only wins contribute to the reserve; losses must not."""
+        settings.economics.profit_stash_pct = 0.3
+        settings.options.min_hold_hours = 0.0
+        # Deep-OTM call: mark ~= 0 << entry -> SL fires, pnl < 0.
+        store.open_option(
+            "AAPL", "call", strike=1_000_000.0, expiry_ts=time.time() + 7 * 86400,
+            iv=0.2, contracts=1.0, entry_premium=1.0,
+            genome_id=None, tp_premium=1.5, sl_premium=0.99,
+        )
+        engine = make_engine(settings, store)
+        engine.run_cycle()
+        assert store.reserve_balance() == pytest.approx(0.0), (
+            "a losing close must never add to the reserve"
+        )
+
+
+class TestStaleEviction:
+    """Positions that go sideways for too long must be closed to free a slot
+    for stronger incoming signals. Only old positions that are NOT making
+    meaningful gains qualify — big winners are held, young positions are
+    untouched."""
+
+    _EXPIRY = time.time() + 7 * 86_400   # 7 days out, well above min_hours_to_expiry
+
+    def _stale_opt(self, store):
+        """Deep-OTM option: mark ≈ 0, entry=1.0 → pnl_pct ≈ -100% (below any threshold).
+        sl=0.0 + min_hold_hours=1000 keep the normal SL gate from firing."""
+        return store.open_option(
+            "AAPL", "call", strike=1_000_000.0,
+            expiry_ts=self._EXPIRY,
+            iv=0.2, contracts=1.0, entry_premium=1.0,
+            genome_id=None, tp_premium=1e9, sl_premium=0.0,
+        )
+
+    def _winning_opt(self, store):
+        """Deep-ITM option: mark >> entry → pnl_pct >> stale_max_profit_pct."""
+        return store.open_option(
+            "AAPL", "call", strike=0.001,
+            expiry_ts=self._EXPIRY,
+            iv=0.2, contracts=1.0, entry_premium=0.01,
+            genome_id=None, tp_premium=1e9, sl_premium=0.0,
+        )
+
+    def _setup(self, settings):
+        settings.loop.stale_evict_enabled = True
+        settings.loop.stale_hours = 48.0
+        settings.loop.stale_max_profit_pct = 0.10
+        settings.options.min_hold_hours = 1000.0   # block TP/SL; only stale evicts
+
+    def test_old_sideways_position_evicted(self, settings, store):
+        """An option older than stale_hours with pnl < stale_max_profit_pct must be closed."""
+        self._setup(settings)
+        oid = self._stale_opt(store)
+        # Pretend 72 hours have passed since the position was opened.
+        future = time.time() + 72 * 3600
+        make_engine(settings, store, now=lambda: future).run_cycle()
+
+        assert oid not in {o["id"] for o in store.open_options()}, (
+            "stale option should be evicted after 72 h with near-zero PnL"
+        )
+        trades = store.recent_activity(50)
+        assert any("stale" in (t.get("summary") or "").lower() for t in trades), (
+            "stale close must appear in activity log"
+        )
+
+    def test_young_position_not_evicted(self, settings, store):
+        """An option that is only minutes old must not be evicted, even if pnl ≈ 0."""
+        self._setup(settings)
+        oid = self._stale_opt(store)
+        # No time offset — the option was just opened.
+        make_engine(settings, store).run_cycle()
+
+        assert oid in {o["id"] for o in store.open_options()}, (
+            "young option must not be evicted by stale logic"
+        )
+
+    def test_winning_position_not_evicted(self, settings, store):
+        """A position with pnl >= stale_max_profit_pct must never be evicted."""
+        self._setup(settings)
+        oid = self._winning_opt(store)
+        future = time.time() + 72 * 3600
+        make_engine(settings, store, now=lambda: future).run_cycle()
+
+        assert oid in {o["id"] for o in store.open_options()}, (
+            "winning option must NOT be stale-evicted even when old"
+        )
+
+    def test_stale_eviction_disabled(self, settings, store):
+        """stale_evict_enabled=False suppresses eviction even when conditions are met."""
+        self._setup(settings)
+        settings.loop.stale_evict_enabled = False
+        oid = self._stale_opt(store)
+        future = time.time() + 72 * 3600
+        make_engine(settings, store, now=lambda: future).run_cycle()
+
+        assert oid in {o["id"] for o in store.open_options()}, (
+            "stale eviction must respect stale_evict_enabled=False"
+        )
+
+    def test_stale_eviction_frees_slot_for_new_entry(self, settings, store):
+        """Stale eviction reduces open_count so the candidates loop can enter a new position."""
+        self._setup(settings)
+        settings.loop.max_positions = 1  # book is full with one option
+        # A single stale option fills the only slot.
+        self._stale_opt(store)
+        open_before = len(store.open_options())
+        assert open_before == 1
+
+        future = time.time() + 72 * 3600
+        make_engine(settings, store, now=lambda: future).run_cycle()
+
+        # After eviction the book is no longer full; the engine may or may not
+        # open a new position depending on signal, but the stale one is gone.
+        closed = store.closed_options()
+        assert closed, "stale option must be closed (freeing the slot)"
+
+
+class TestCashReservePct:
+    """Keep a configurable fraction of net worth in cash rather than deploying
+    everything. As the portfolio grows, the absolute position budget grows too
+    (proportional scaling). The reserve is enforced per new entry."""
+
+    def test_cash_reserve_pct_normalises_percent(self):
+        """OptionsConfig(cash_reserve_pct=40) must behave as 0.40, not 40.0."""
+        from lmtrade.config import OptionsConfig
+        assert OptionsConfig(cash_reserve_pct=40).cash_reserve_pct == pytest.approx(0.40), (
+            "cash_reserve_pct=40 should be normalised to 0.40 (40 %)"
+        )
+        assert OptionsConfig(cash_reserve_pct=0.4).cash_reserve_pct == pytest.approx(0.40)
+        # Edge values
+        assert OptionsConfig(cash_reserve_pct=0).cash_reserve_pct == pytest.approx(0.0)
+        assert OptionsConfig(cash_reserve_pct=1.0).cash_reserve_pct == pytest.approx(1.0)
+
+    def test_fully_reserved_blocks_all_new_positions(self, settings, store):
+        """cash_reserve_pct=1.0 means zero deployable capital → no positions opened."""
+        settings.options.cash_reserve_pct = 1.0
+        settings.options.enabled = True
+        make_engine(settings, store).run_cycle()
+        assert store.open_options() == [], (
+            "with 100 % cash reserve no new option should be opened"
+        )
+
+    def test_budget_respects_reserve_cap(self, settings, store):
+        """_position_budget is capped so deployed + new ≤ (1-reserve)*equity."""
+        from unittest.mock import MagicMock
+        from lmtrade.data.market import Quote
+        from lmtrade.agents.fusion import Decision
+
+        settings.options.cash_reserve_pct = 0.9   # only 10 % deployable
+        settings.options.max_option_fraction = 0.5 # would want 50 % per trade
+
+        engine = make_engine(settings, store)
+        # equity = budget = 10, max_deployable = 10 * 0.1 = 1.0
+        quote = MagicMock(spec=Quote)
+        quote.symbol = "AAPL"
+        quote.price = 150.0
+        quote.history = [150.0] * 50
+        decision = MagicMock(spec=Decision)
+        decision.direction = "buy"
+        decision.confidence = 1.0
+
+        budget = engine._position_budget(quote, decision, None)
+        # Without reserve: min(0.5 * 10, 10 - fee) = 5.0
+        # With reserve:    min(0.5 * 10, 1.0,  10 - fee) = 1.0
+        assert budget <= settings.budget * (1.0 - settings.options.cash_reserve_pct) + 0.2, (
+            "budget must not exceed deployable_capital = equity * (1-cash_reserve_pct)"
+        )

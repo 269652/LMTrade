@@ -114,6 +114,36 @@ class TestDashboardShell:
         # actually re-fetched instead of rendered against a new HTML shell.
         assert "app.js?v=" in html
 
+    def test_dashboard_html_contains_all_element_ids_used_by_appjs(self, client):
+        """Regression: app.js uses $(id) = document.getElementById(id) to
+        drive every paint function. If an element is removed from the HTML
+        while still referenced in JS, the JS throws a ReferenceError on the
+        first refresh — silently aborting the whole repaint cycle and leaving
+        the dashboard frozen at 'loading…'.
+
+        This test extracts every string passed to $() in app.js and asserts
+        the matching id="…" attribute exists in dashboard.html, so the gap is
+        caught at test time rather than discovered visually."""
+        import re
+        from pathlib import Path
+
+        static = Path(__file__).parents[1] / "src" / "lmtrade" / "web" / "static" / "app.js"
+        templates = Path(__file__).parents[1] / "src" / "lmtrade" / "web" / "templates" / "dashboard.html"
+
+        js = static.read_text(encoding="utf-8")
+        html = templates.read_text(encoding="utf-8")
+
+        # Collect every literal id passed to $("...") or $('...')
+        js_ids = set(re.findall(r'\$\(["\']([^"\']+)["\']\)', js))
+        # Collect every id="..." in the HTML
+        html_ids = set(re.findall(r'\bid=["\']([^"\']+)["\']', html))
+
+        missing = js_ids - html_ids
+        assert not missing, (
+            f"app.js references element id(s) not present in dashboard.html: {missing}\n"
+            "Add the element or remove the dead reference."
+        )
+
     def test_leaderboard_available_for_strategies_tab(self, client):
         r = client.get("/api/leaderboard")
         assert r.status_code == 200
@@ -435,6 +465,40 @@ class TestLegacyInfiniteDataJsonSafety:
         assert r.json()["economics"]["runway_hours"] is None
 
 
+class TestSettingsAutoRestart:
+    """Saving settings through the API must trigger an engine restart so the
+    new config is picked up without manual intervention."""
+
+    def test_applied_changes_set_restarting_flag_and_schedule_restart(self, tmp_path):
+        import unittest.mock as mock
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        config_path = tmp_path / "config.toml"
+        with mock.patch("lmtrade.web.app._schedule_restart") as mock_restart, \
+             mock.patch("lmtrade.web.app.DEFAULT_TOML_PATH", config_path):
+            c = TestClient(create_app(s))
+            res = c.post("/api/settings", json={"changes": {"economics.profit_stash_pct": "0.3"}})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["restarting"] is True
+        assert "economics.profit_stash_pct" in data["applied"]
+        mock_restart.assert_called_once()
+
+    def test_all_rejected_does_not_restart(self, tmp_path):
+        import unittest.mock as mock
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        config_path = tmp_path / "config.toml"
+        with mock.patch("lmtrade.web.app._schedule_restart") as mock_restart, \
+             mock.patch("lmtrade.web.app.DEFAULT_TOML_PATH", config_path):
+            c = TestClient(create_app(s))
+            res = c.post("/api/settings", json={"changes": {"not.a.real.key": "x"}})
+        assert res.json().get("restarting") is False
+        mock_restart.assert_not_called()
+
+
 class TestNewEndpoints:
     def test_options_endpoint(self, client):
         r = client.get("/api/options")
@@ -462,3 +526,71 @@ class TestNewEndpoints:
         r = client.get("/api/news")
         assert r.status_code == 200
         assert isinstance(r.json(), list)
+
+
+class TestProviderWarningNotification:
+    """When the news provider hits a usage limit, a warning must be stored so
+    the dashboard can surface a dismissible notification instead of silently
+    failing across the whole universe."""
+
+    def test_provider_limit_error_writes_warning_to_store(self, tmp_path):
+        """A ProviderLimitError from the fetcher must be caught by NewsService
+        and persisted as a provider_warnings meta key in the Store."""
+        from lmtrade.models.providers import ProviderLimitError
+        from lmtrade.research.news import NewsService
+
+        s = Settings(mode="paper", budget=10.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+
+        def failing_fetcher(symbol):
+            raise ProviderLimitError("Claude CLI exited 1 -- usage limit reached")
+
+        svc = NewsService(store, s, fetcher=failing_fetcher)
+        result = svc.get("AAPL")
+
+        assert result is None  # no cached fallback -> returns None
+        warnings = store.get_meta("provider_warnings")
+        assert warnings is not None, "provider_warnings meta must be set after a limit error"
+        assert "limit" in warnings.get("msg", "").lower() or "claude" in warnings.get("msg", "").lower()
+        assert "ts" in warnings
+        store.close()
+
+    def test_ordinary_exception_does_not_write_provider_warning(self, tmp_path):
+        """A plain network/parse error is not a limit -- must not pollute the
+        provider_warnings key so the dashboard does not cry wolf."""
+        from lmtrade.research.news import NewsService
+
+        s = Settings(mode="paper", budget=10.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+
+        def broken_fetcher(symbol):
+            raise ConnectionError("connection refused")
+
+        svc = NewsService(store, s, fetcher=broken_fetcher)
+        svc.get("AAPL")
+
+        assert store.get_meta("provider_warnings") is None
+        store.close()
+
+    def test_summary_api_exposes_provider_warnings(self, tmp_path):
+        """The /api/summary endpoint must include provider_warnings so the
+        dashboard can render the notification banner."""
+        s = Settings(mode="paper", budget=10.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        store.set_meta("provider_warnings", {"msg": "limit hit", "ts": 1234567890.0})
+        store.close()
+
+        data = TestClient(create_app(s)).get("/api/summary").json()
+        assert "provider_warnings" in data
+        assert data["provider_warnings"]["msg"] == "limit hit"
+
+    def test_summary_api_provider_warnings_none_by_default(self, client):
+        """No warnings when nothing has failed."""
+        data = client.get("/api/summary").json()
+        assert data.get("provider_warnings") is None

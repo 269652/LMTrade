@@ -64,6 +64,9 @@ loop:
                            # below universe size; slots go to the strongest
                            # ranked signals across the whole universe each
                            # cycle, not first-come-first-served by list order
+  stale_evict_enabled: true  # evict sideways positions that tie up capital
+  stale_hours: 48            # minimum age (hours) before a position can be stale
+  stale_max_profit_pct: 0.10 # evict if pnl% < 10 % — flat/losing but not yet at SL
 
 model:
   stack: [heuristic, slm, perplexity]   # providers consulted, in order
@@ -94,6 +97,7 @@ options:                   # synthetic Black-Scholes options layer (paper)
   take_profit_pct: 0.5       # +50% premium -> take profit
   stop_loss_pct: 0.4         # -40% premium -> cut
   min_hours_to_expiry: 24    # force-close inside this window
+  cash_reserve_pct: 0.40     # keep 40 % of net worth in cash; deploy the rest
 
 learning:                  # evolutionary strategy optimizer
   enabled: true

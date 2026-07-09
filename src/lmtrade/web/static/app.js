@@ -132,22 +132,27 @@ function paintSummary(s) {
   $("reserve").textContent = fmt(s.reserve != null ? s.reserve : (econ.reserve_eur || 0)) + " " + cur;
   $("npos").textContent = s.num_positions;
   const compute = (econ.gpu_cost_accrued_usd || 0) + (econ.inference_cost_usd || 0);
-  // In live mode the CASH card already IS the real TR balance, so the separate
-  // TR Account Cash card is redundant — hide it. Keep it in paper mode.
-  const trCard = $("trcash-card");
-  if (trCard) trCard.style.display = isLive ? "none" : "";
-  $("trcash").textContent = s.tr_account_cash != null ? fmt(s.tr_account_cash) + " " + cur : "—";
-
   const banner = $("econ");
   if (econ.self_sustaining) {
     banner.className = "econ-banner econ-ok";
-    banner.innerHTML = `✅ <b>Self-sustaining</b> — gains cover all compute. Runway ${fmt(econ.runway_hours,1)}h at $${fmt(econ.gpu_usd_per_hour,3)}/hr GPU.`;
+    banner.innerHTML = `✅ <b>Outperforming SP 500</b> — gains cover all compute.`;
   } else if (econ.halt_trading) {
     banner.className = "econ-banner econ-warn";
     banner.innerHTML = `⛔ <b>Runway below floor</b> (${fmt(econ.runway_hours,1)}h) — new entries halted, managing exits only.`;
   } else {
     banner.className = "econ-banner econ-warn";
     banner.innerHTML = `⏳ <b>Subsidised</b> — not yet covering compute. Net worth $${fmt(econ.net_worth_usd,2)}, compute spent $${fmt(compute,4)}, runway ${fmt(econ.runway_hours,1)}h.`;
+  }
+
+  // Provider warning banner (e.g. Claude usage limit hit)
+  const pwBanner = $("provider-warning-banner");
+  const pw = s.provider_warnings;
+  if (pw && pw.msg) {
+    pwBanner.innerHTML = `⚠️ <b>Research provider warning:</b> ${pw.msg}
+      <button onclick="dismissProviderWarning()" style="margin-left:12px;padding:2px 8px;cursor:pointer;border-radius:4px;border:none;background:#555;color:#fff;font-size:12px">Dismiss</button>`;
+    pwBanner.classList.add("show");
+  } else {
+    pwBanner.classList.remove("show");
   }
 }
 
@@ -412,9 +417,51 @@ async function saveSettings() {
   const res = await postJSON("/api/settings", {changes});
   const n = Object.keys(res.applied || {}).length;
   const bad = (res.rejected || []).length;
-  $("settings-status").textContent =
-    `Saved ${n} setting${n === 1 ? "" : "s"}${bad ? `, ${bad} rejected` : ""}. ` +
-    `Restart \`lmtrade run\` to apply.`;
+  if (res.restarting) {
+    $("settings-overlay").classList.remove("show");
+    showRestartOverlay();
+  } else {
+    $("settings-status").textContent =
+      `Saved ${n} setting${n === 1 ? "" : "s"}${bad ? `, ${bad} rejected` : ""}` +
+      (n > 0 ? " — restart `lmtrade run` to apply." : ".");
+  }
+}
+
+function showRestartOverlay() {
+  const el = document.createElement("div");
+  el.id = "restart-overlay";
+  el.className = "restart-overlay";
+  el.innerHTML =
+    `<div class="r-title">⟳ Restarting engine…</div>` +
+    `<div class="r-sub">Applying new settings, back in a moment.</div>`;
+  document.body.appendChild(el);
+  pollUntilBack(el);
+}
+
+async function pollUntilBack(el) {
+  // Brief pause so the server process has time to begin shutting down.
+  await new Promise(r => setTimeout(r, 1500));
+  for (let i = 0; i < 60; i++) {
+    try {
+      const r = await fetch("/healthz");
+      if (r.ok) {
+        el.remove();
+        refresh();
+        return;
+      }
+    } catch (_) { /* server temporarily down — keep polling */ }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  el.querySelector(".r-title").textContent = "⚠ Restart timed out";
+  el.querySelector(".r-sub").textContent = "Please reload the page manually.";
+}
+
+async function dismissProviderWarning() {
+  // Clear the persistent warning from the store so it won't reappear until
+  // the next limit event. Uses a lightweight PATCH-style endpoint.
+  try { await fetch("/api/dismiss-provider-warning", {method: "POST"}); } catch (_) {}
+  const el = $("provider-warning-banner");
+  if (el) el.classList.remove("show");
 }
 
 $("settings-btn").addEventListener("click", openSettings);

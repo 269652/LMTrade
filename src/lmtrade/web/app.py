@@ -47,6 +47,27 @@ class SafeJSONResponse(JSONResponse):
         return super().render(_json_safe(content))
 
 
+def _schedule_restart() -> None:
+    """Replace the running process with a fresh copy 0.5 s after being called.
+
+    The short delay lets FastAPI finish sending the HTTP response before the
+    process image is replaced. Works for both ``lmtrade run`` (engine + web in
+    one process) and ``lmtrade web`` (web-only); in both cases ``os.execv``
+    re-executes the same command with the same arguments, picking up the newly
+    saved ``config.toml``.
+    """
+    import os
+    import sys
+    import threading
+
+    def _exec() -> None:
+        import time
+        time.sleep(0.5)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    threading.Thread(target=_exec, daemon=True).start()
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     # Two books, one connection each. Which one every read serves is chosen
@@ -151,6 +172,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "economics": econ,
             "positions": rows,
             "num_positions": len(rows),
+            "provider_warnings": store().get_meta("provider_warnings"),
         })
 
     @app.get("/api/trades")
@@ -348,7 +370,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def post_settings(payload: dict) -> JSONResponse:
         changes = (payload or {}).get("changes", {})
         result = settings_editor.apply_changes(DEFAULT_TOML_PATH, changes)
-        return SafeJSONResponse(result)
+        restarting = bool(result.get("applied"))
+        if restarting:
+            _schedule_restart()
+        return SafeJSONResponse({**result, "restarting": restarting})
 
     @app.get("/healthz")
     def healthz() -> dict:
