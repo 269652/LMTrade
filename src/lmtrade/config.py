@@ -195,7 +195,22 @@ class Settings(BaseModel):
 
     @property
     def db_path(self) -> Path:
+        """Paper-trading book (default). Fully separate from the live book."""
         return self.data_dir / "lmtrade.db"
+
+    @property
+    def live_db_path(self) -> Path:
+        """Live-trading book — real fills only. Kept in a separate database so
+        paper and live ledgers, trade history and activity never mix."""
+        return self.data_dir / "lmtrade-live.db"
+
+    def book_db_path(self, book: str) -> Path:
+        return self.live_db_path if book == "live" else self.db_path
+
+    @property
+    def control_path(self) -> Path:
+        """Persisted paper/live + armed control state shared by engine & web."""
+        return self.data_dir / "control.json"
 
 
 def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
