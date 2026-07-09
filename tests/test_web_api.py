@@ -82,6 +82,43 @@ class TestSummaryIncludesOptions:
         assert nvda["isin"] == "DE000KO1"          # real TR knockout surfaced
         assert nvda["kind"] in ("put", "knockout") or "put" in nvda["symbol"].lower()
 
+    def test_positions_include_live_pnl_from_persisted_marks(self, tmp_path):
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        store.open_option("AAPL", "call", strike=100.0, expiry_ts=4e12, iv=0.2,
+                          contracts=2.0, entry_premium=2.5, genome_id=None,
+                          tp_premium=3.75, sl_premium=1.5)
+        opt_id = store.open_options()[0]["id"]
+        store.set_meta("open_option_marks", {str(opt_id): {
+            "mark_premium": 3.0, "value": 6.0, "unrealized_pnl": 1.0, "spot": 110.0}})
+        store.close()
+        client = TestClient(create_app(s))
+        row = next(p for p in client.get("/api/summary").json()["positions"]
+                   if "AAPL" in p["symbol"])
+        assert row["unrealized_pnl"] == 1.0
+        assert row["value"] == 6.0
+
+    def test_positions_pnl_none_when_no_mark_yet(self, options_client):
+        # Before the first cycle marks them, P&L is unknown (None), not a crash.
+        row = next(p for p in options_client.get("/api/summary").json()["positions"]
+                   if "AAPL" in p["symbol"])
+        assert row["unrealized_pnl"] is None
+
+
+class TestDashboardShell:
+    def test_index_serves_cache_busted_appjs(self, client):
+        html = client.get("/").text
+        # A version query defeats the browser cache so a pulled app.js is
+        # actually re-fetched instead of rendered against a new HTML shell.
+        assert "app.js?v=" in html
+
+    def test_leaderboard_available_for_strategies_tab(self, client):
+        r = client.get("/api/leaderboard")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
 
 class TestInfiniteRunwayJsonSafety:
     """gpu_usd_per_hour=0 (no GPU rented) makes runway_hours float('inf') —

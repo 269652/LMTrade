@@ -163,6 +163,29 @@ class TestEquityValuation:
         assert last["equity"] >= last["cash"]
 
 
+class TestOptionMarkPersistence:
+    """Each cycle the engine already marks every open option to compute
+    equity; it must persist those per-option marks + unrealized P&L so the
+    dashboard can show live profit/loss instead of only entry premium."""
+
+    def test_run_cycle_persists_unrealized_pnl(self, settings, store):
+        # Block TP/SL exits so the planted option is guaranteed still open
+        # when marks are persisted at the end of the cycle.
+        settings.options.min_hold_hours = 10_000.0
+        store.open_option("AAPL", "call", strike=1_000_000.0, expiry_ts=4e12,
+                          iv=0.2, contracts=2.0, entry_premium=1.0,
+                          genome_id=None, tp_premium=1.5, sl_premium=0.6)
+        opt_id = store.open_options()[0]["id"]
+        engine = make_engine(settings, store)
+        engine.run_cycle()
+        marks = store.get_meta("open_option_marks", {})
+        assert str(opt_id) in marks
+        row = marks[str(opt_id)]
+        assert "unrealized_pnl" in row
+        assert "value" in row
+        assert "mark_premium" in row
+
+
 class TestBookFullVisibility:
     """When every position slot is taken, the engine skips the whole
     decision/entry step and previously logged nothing but economics — which

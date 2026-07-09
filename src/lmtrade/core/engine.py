@@ -124,6 +124,26 @@ class Engine:
             total += o["contracts"] * self._mark_position(o, spot)
         return total
 
+    def _persist_option_marks(self, prices: dict[str, float]) -> None:
+        """Store the current mark + unrealized P&L for each open option so the
+        dashboard can show live profit/loss (it's read-only over the Store and
+        has no market feed of its own). Keyed by option id as a string."""
+        marks: dict[str, dict] = {}
+        for o in self.store.open_options():
+            spot = prices.get(o["underlying"])
+            if spot is None:
+                continue
+            mark = self._mark_position(o, spot)
+            value = o["contracts"] * mark
+            cost = o["contracts"] * o["entry_premium"]
+            marks[str(o["id"])] = {
+                "mark_premium": round(mark, 4),
+                "value": round(value, 4),
+                "unrealized_pnl": round(value - cost, 4),
+                "spot": round(spot, 4),
+            }
+        self.store.set_meta("open_option_marks", marks)
+
     # ------------------------------------------------------------ research jobs
     def _run_scheduled_jobs(self) -> None:
         news_iv = self.settings.research.news_interval_minutes * 60
@@ -484,6 +504,7 @@ class Engine:
 
         cash = self.broker.cash()
         total_value = self._positions_value(prices) + self._options_value(prices)
+        self._persist_option_marks(prices)
         econ = self.accountant.snapshot(cash, total_value, self.store.reserve_balance())
         self.store.set_meta("economics", econ.as_dict())
         self._update_benchmark(prices)

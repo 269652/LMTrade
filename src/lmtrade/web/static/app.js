@@ -13,12 +13,13 @@ function sideClass(s) { return s === "buy" ? "buy" : s === "sell" ? "sell" : "ho
 
 async function refresh() {
   try {
-    const [s, trades, activity, logs, equity] = await Promise.all([
+    const [s, trades, activity, logs, equity, strategies] = await Promise.all([
       getJSON("/api/summary"),
       getJSON("/api/trades?limit=100"),
       getJSON("/api/activity?limit=100"),
       getJSON("/api/logs?limit=200"),
       getJSON("/api/equity"),
+      getJSON("/api/leaderboard"),
     ]);
     paintSummary(s);
     paintPositions(s.positions);
@@ -26,6 +27,7 @@ async function refresh() {
     paintActivity(activity);
     paintLogs(logs);
     paintChart(equity);
+    paintStrategies(strategies);
   } catch (e) {
     console.error(e);
   }
@@ -66,11 +68,30 @@ function paintSummary(s) {
   }
 }
 
+function pnlCell(v) {
+  if (v == null) return `<td class="muted">—</td>`;
+  const cls = v >= 0 ? "pos" : "neg";
+  const sign = v >= 0 ? "+" : "";
+  return `<td class="num ${cls}">${sign}${fmt(v)}</td>`;
+}
+
 function paintPositions(rows) {
   $("positions").innerHTML = rows.length
     ? rows.map(p => `<tr><td>${p.symbol}</td><td><span class="kind">${p.kind || "equity"}</span></td>`
-        + `<td>${p.isin || "—"}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.avg_price)}</td></tr>`).join("")
-    : `<tr><td colspan="5" class="muted">No open positions.</td></tr>`;
+        + `<td>${p.isin || "—"}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.avg_price)}</td>`
+        + `<td>${p.value == null ? "—" : fmt(p.value)}</td>${pnlCell(p.unrealized_pnl)}</tr>`).join("")
+    : `<tr><td colspan="7" class="muted">No open positions.</td></tr>`;
+}
+
+function paintStrategies(rows) {
+  $("strategies").innerHTML = rows && rows.length
+    ? rows.map(g => {
+        const params = Object.entries(g.params || {})
+          .map(([k, v]) => `${k}=${typeof v === "number" ? Number(v).toFixed(2) : v}`).join(", ");
+        return `<tr><td>${g.strategy}</td><td class="muted">${params}</td>`
+          + `<td>${g.trades}</td>${pnlCell(g.pnl)}<td>${fmt(g.fitness, 4)}</td></tr>`;
+      }).join("")
+    : `<tr><td colspan="5" class="muted">No strategies evolved yet — they appear once trades close and the optimizer runs.</td></tr>`;
 }
 
 function paintTrades(rows) {
@@ -119,7 +140,7 @@ document.querySelectorAll(".tab").forEach(tab => {
   tab.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
     tab.classList.add("active");
-    ["positions", "trades", "activity", "logs"].forEach(name =>
+    ["positions", "strategies", "trades", "activity", "logs"].forEach(name =>
       $("tab-" + name).classList.toggle("hidden", name !== tab.dataset.tab));
   });
 });

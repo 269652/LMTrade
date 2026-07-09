@@ -57,7 +57,12 @@
   .econ-ok { background:rgba(63,185,80,.08); border-color:var(--green); }
   .econ-warn { background:rgba(210,153,34,.08); border-color:var(--amber); }
   .muted { color:var(--muted); }
-  svg { width:100%; height:120px; }
+  .num.pos { color:var(--green); } .num.neg { color:var(--red); }
+  svg#chart { width:100%; height:120px; }
+  .refresh { display:inline-flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); }
+  .ring { width:18px; height:18px; }
+  .ring-progress { animation:ringfill 5s linear infinite; }
+  @keyframes ringfill { from { stroke-dashoffset:50.27; } to { stroke-dashoffset:0; } }
 </style>
 </head>
 <body>
@@ -65,7 +70,15 @@
   <h1>⚡ LMTrade</h1>
   <span id="mode" class="badge paper">paper</span>
   <span class="spacer"></span>
-  <span class="muted" style="font-size:12px;"><span class="dot"></span> live · refresh 5s</span>
+  <span class="refresh">
+    <svg class="ring" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="8" fill="none" stroke="var(--line)" stroke-width="2"/>
+      <circle class="ring-progress" cx="10" cy="10" r="8" fill="none" stroke="var(--green)"
+              stroke-width="2" stroke-linecap="round" stroke-dasharray="50.27"
+              transform="rotate(-90 10 10)"/>
+    </svg>
+    <span class="dot"></span> live · refresh 5s
+  </span>
 </header>
 <main>
   <div id="econ" class="econ-banner econ-ok">loading economics…</div>
@@ -85,14 +98,20 @@
 
   <div class="tabs">
     <div class="tab active" data-tab="positions">Positions</div>
+    <div class="tab" data-tab="strategies">Strategies</div>
     <div class="tab" data-tab="trades">Trades</div>
     <div class="tab" data-tab="activity">Activity</div>
     <div class="tab" data-tab="logs">Logs</div>
   </div>
 
   <section id="tab-positions">
-    <table><thead><tr><th>Symbol</th><th>Type</th><th>ISIN</th><th>Qty</th><th>Avg Price</th></tr></thead>
+    <table><thead><tr><th>Symbol</th><th>Type</th><th>ISIN</th><th>Qty</th><th>Avg Price</th><th>Value</th><th>P&amp;L</th></tr></thead>
       <tbody id="positions"></tbody></table>
+  </section>
+
+  <section id="tab-strategies" class="hidden">
+    <table><thead><tr><th>Strategy</th><th>Params</th><th>Trades</th><th>P&amp;L</th><th>Fitness</th></tr></thead>
+      <tbody id="strategies"></tbody></table>
   </section>
 
   <section id="tab-trades" class="hidden">

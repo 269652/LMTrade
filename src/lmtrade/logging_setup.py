@@ -3,16 +3,31 @@ state store so the web dashboard can display them."""
 from __future__ import annotations
 
 import logging
+import sys
 
 from rich.logging import RichHandler
 
 _CONFIGURED = False
 
 
+def _force_utf8_streams() -> None:
+    """Make stdout/stderr tolerate non-ASCII (€, →, emoji in banners/logs).
+    A legacy Windows console defaults to cp1252, which raises
+    UnicodeEncodeError on those glyphs and can crash a log write mid-run.
+    reconfigure() (Python 3.7+) switches the stream to UTF-8 and, failing
+    that, replaces unencodable chars instead of raising."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — best effort; never block startup
+            pass
+
+
 def setup_logging(level: int = logging.INFO) -> None:
     global _CONFIGURED
     if _CONFIGURED:
         return
+    _force_utf8_streams()
     logging.basicConfig(
         level=level,
         format="%(message)s",

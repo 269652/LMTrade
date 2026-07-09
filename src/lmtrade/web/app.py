@@ -8,6 +8,7 @@ Run with:  lmtrade web
 """
 from __future__ import annotations
 
+import hashlib
 import math
 from pathlib import Path
 from typing import Any
@@ -52,9 +53,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if STATIC.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
+    def _asset_version() -> str:
+        """Short content hash of app.js, appended as ?v= to its URL so a
+        changed file bypasses the browser cache (otherwise a pulled app.js is
+        rendered against a freshly-served HTML shell — column mismatch)."""
+        js = STATIC / "app.js"
+        if not js.exists():
+            return "0"
+        return hashlib.sha1(js.read_bytes()).hexdigest()[:8]
+
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return (TEMPLATES / "dashboard.html").read_text()
+        # Explicit utf-8: Path.read_text() uses the platform default encoding,
+        # which on Windows is cp1252 and mangles the template's ⚡/· glyphs
+        # into mojibake (âš¡ / Â·) before they're ever served.
+        html = (TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+        return html.replace("/static/app.js", f"/static/app.js?v={_asset_version()}")
 
     @app.get("/api/summary")
     def summary() -> JSONResponse:
@@ -69,20 +83,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # omitted, so an options-only book (the common case) showed "0
         # positions" even when full. For an option, qty=contracts and
         # avg_price=entry premium; the real TR ISIN is surfaced when present.
+        marks = store.get_meta("open_option_marks", {}) or {}
         rows = [
             {"symbol": p.symbol, "qty": round(p.qty, 6),
-             "avg_price": round(p.avg_price, 4), "kind": "equity", "isin": None}
+             "avg_price": round(p.avg_price, 4), "kind": "equity", "isin": None,
+             "value": None, "unrealized_pnl": None}
             for p in equity_positions
         ]
         for o in open_opts:
             kind = o.get("instrument_type") or "option"
             label = f"{o['underlying']} {o.get('kind', '')}".strip()
+            # Live mark persisted by the engine each cycle; None until the
+            # first cycle marks this option (don't fabricate a P&L).
+            mark = marks.get(str(o.get("id")))
             rows.append({
                 "symbol": label,
                 "qty": round(o.get("contracts", 0.0), 6),
                 "avg_price": round(o.get("entry_premium", 0.0), 4),
                 "kind": kind,
                 "isin": o.get("isin"),
+                "value": mark.get("value") if mark else None,
+                "unrealized_pnl": mark.get("unrealized_pnl") if mark else None,
             })
         return SafeJSONResponse({
             "mode": store.get_meta("mode", settings.mode),
