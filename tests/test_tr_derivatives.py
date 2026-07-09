@@ -16,6 +16,7 @@ from lmtrade.agents.fusion import Decision
 from lmtrade.brokers.paper import PaperBroker
 from lmtrade.brokers.tr_derivatives import (
     FakeTRDerivatives,
+    PytrDerivatives,
     TRDerivativeQuote,
     build_tr_derivatives,
 )
@@ -69,6 +70,135 @@ class TestFactory:
         monkeypatch.setenv("TR_PIN", "1234")
         settings.tr.use_derivatives = False
         assert build_tr_derivatives(settings) is None
+
+
+class FakeAsyncTRApi:
+    """Minimal async fake mirroring the actual pytr>=0.4 `TradeRepublicApi`
+    surface PytrDerivatives relies on (resume_websession/search/
+    search_derivative/recv/unsubscribe) — verified against the real
+    installed pytr 0.4.9 source, not guessed. Lets PytrDerivatives' own glue
+    logic be tested without the optional pytr dependency installed and
+    without ever touching TR's real (websocket) API."""
+
+    def __init__(self, resume_ok=True, search_results=None, derivative_results=None):
+        self.resume_ok = resume_ok
+        self._search_results = (
+            search_results if search_results is not None else [{"isin": "US0378331005"}])
+        self._derivative_results = derivative_results if derivative_results is not None else []
+        self.calls: list[tuple] = []
+
+    def resume_websession(self) -> bool:
+        return self.resume_ok
+
+    async def search(self, query, asset_type="stock"):
+        self.calls.append(("search", query, asset_type))
+        return "sub-search"
+
+    async def search_derivative(self, isin, product_type):
+        self.calls.append(("search_derivative", isin, product_type))
+        return "sub-deriv"
+
+    async def recv(self):
+        kind = self.calls[-1][0]
+        if kind == "search":
+            return ("sub-search", {}, {"results": self._search_results})
+        return ("sub-deriv", {}, {"results": self._derivative_results})
+
+    async def unsubscribe(self, sub_id):
+        self.calls.append(("unsubscribe", sub_id))
+
+
+class TestPytrLoginFlow:
+    """The installed pytr>=0.4 TradeRepublicApi has no `.login()` method —
+    confirmed by inspecting the actual installed package. Non-interactive use
+    (from inside the engine loop) must resume a cached session via
+    resume_websession() and degrade — never block on interactive 2FA input —
+    when there isn't one to resume."""
+
+    def test_resumes_cached_session_without_interactive_login(self):
+        api = FakeAsyncTRApi(resume_ok=True)
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.available() is True
+
+    def test_unresumable_session_degrades_without_blocking(self):
+        api = FakeAsyncTRApi(resume_ok=False)
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.available() is False
+        assert client.search("AAPL", "buy") == []
+
+    def test_factory_exception_degrades_gracefully(self):
+        def boom():
+            raise RuntimeError("no pytr installed")
+
+        client = PytrDerivatives("+491234", "1234", api_factory=boom)
+        assert client.available() is False
+
+    def test_login_result_is_cached_not_repeated(self):
+        calls = []
+
+        def factory():
+            calls.append(1)
+            return FakeAsyncTRApi(resume_ok=True)
+
+        client = PytrDerivatives("+491234", "1234", api_factory=factory)
+        client.available()
+        client.available()
+        assert len(calls) == 1
+
+
+class TestPytrSearchGlue:
+    """search() must resolve the underlying ticker to an ISIN first (TR's
+    search_derivative takes an ISIN, not a ticker) then query derivatives —
+    the previous code called a nonexistent `derivative_search` method with
+    the wrong signature entirely."""
+
+    def test_resolves_isin_then_queries_derivatives(self):
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results=[{
+                "isin": "DE000ABC123", "strike": 180.0, "barrier": 180.0,
+                "ratio": 10.0, "ask": 2.5, "leverage": 5.0,
+                "issuerDisplayName": "TestBank",
+            }])
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        quotes = client.search("AAPL", "buy")
+        assert len(quotes) == 1
+        assert quotes[0].isin == "DE000ABC123"
+        assert quotes[0].kind == "ko_call"
+        assert quotes[0].leverage == pytest.approx(5.0)
+        assert ("search", "AAPL", "stock") in api.calls
+        assert ("search_derivative", "US0378331005", "knockout") in api.calls
+
+    def test_sell_direction_maps_to_ko_put(self):
+        api = FakeAsyncTRApi(
+            derivative_results=[{"isin": "DE1", "strike": 100.0, "ask": 1.0, "leverage": 4.0}])
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        quotes = client.search("AAPL", "sell")
+        assert quotes[0].kind == "ko_put"
+
+    def test_no_isin_match_returns_empty(self):
+        api = FakeAsyncTRApi(search_results=[])
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.search("UNKNOWN", "buy") == []
+        assert not any(c[0] == "search_derivative" for c in api.calls)
+
+    def test_malformed_derivative_items_are_skipped_not_crashed(self):
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results=[
+                {"isin": "DE1"},  # missing strike -> skipped
+                {"isin": "DE2", "strike": 50.0, "ask": 1.0, "leverage": 3.0},
+            ])
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        quotes = client.search("AAPL", "buy")
+        assert len(quotes) == 1
+        assert quotes[0].isin == "DE2"
+
+    def test_unavailable_client_short_circuits_search(self):
+        api = FakeAsyncTRApi(resume_ok=False)
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.search("AAPL", "buy") == []
+        assert api.calls == []
 
 
 class TestFakeClient:

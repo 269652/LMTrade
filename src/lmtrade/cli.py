@@ -58,6 +58,37 @@ def _launch_dashboard(settings, host: str, port: int) -> "threading.Thread":
     return thread
 
 
+def _print_diagnostics(settings, engine) -> None:
+    """Surface research-provider/TR-client availability at startup — checked
+    once, eagerly, so a misconfiguration (claude CLI not on PATH, TR session
+    not resumable) is visible immediately instead of only inferable from the
+    absence of [signal] news / knockout lines deep in the scrolling log."""
+    np_ = settings.research.news_provider
+    ap_ = settings.research.analysis_provider
+    if "claude_cli" in (np_, ap_):
+        from .models.providers import ClaudeCLIProvider
+
+        if ClaudeCLIProvider(settings).available():
+            console.print(f"[green]claude CLI found[/green] — news={np_} analysis={ap_}")
+        else:
+            console.print(
+                f"[bold red]claude CLI NOT FOUND on PATH[/bold red] — "
+                f"news_provider={np_} analysis_provider={ap_} will silently "
+                f"produce no news/analysis. Check `claude` is installed and on PATH."
+            )
+    if engine.tr_derivatives is not None:
+        if engine.tr_derivatives.available():
+            console.print(
+                "[green]TR live derivatives: connected[/green] — new positions "
+                "use real TR knockout certificates."
+            )
+        else:
+            console.print(
+                "[bold red]TR live derivatives: unavailable[/bold red] — see "
+                "warning above; falling back to synthetic options."
+            )
+
+
 @app.command()
 def run(
     cycles: int = typer.Option(0, help="Stop after N cycles (0 = run forever)."),
@@ -84,6 +115,7 @@ def run(
     store = Store(settings.db_path)
     broker = build_broker(settings, store)
     engine = Engine(settings, store, broker)
+    _print_diagnostics(settings, engine)
     try:
         engine.run_forever(max_cycles=cycles or None)
     except KeyboardInterrupt:

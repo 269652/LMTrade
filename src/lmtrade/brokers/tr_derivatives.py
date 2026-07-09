@@ -24,6 +24,7 @@ Honest operational caveats, written down so nobody is surprised later:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Callable
 
 from ..config import Settings, secret
 from ..finance.knockouts import MAX_LEVERAGE, MIN_LEVERAGE
@@ -83,25 +84,50 @@ class FakeTRDerivatives(TRDerivativesBase):
 class PytrDerivatives(TRDerivativesBase):
     """Live client over pytr. Lazily logs in on first use; every failure mode
     (missing pytr, login/2FA failure, websocket blocked, payload drift)
-    degrades to unavailable rather than raising into the engine."""
+    degrades to unavailable rather than raising into the engine.
 
-    def __init__(self, phone: str, pin: str):
+    `api_factory` is an injection point for tests (see FakeAsyncTRApi in
+    test_tr_derivatives.py) so this glue code can be verified without the
+    optional pytr dependency installed and without ever touching TR's real
+    (websocket) API. Left unset, it lazily constructs the real
+    pytr.api.TradeRepublicApi.
+    """
+
+    def __init__(self, phone: str, pin: str,
+                 api_factory: Callable[[], Any] | None = None):
         self._phone = phone
         self._pin = pin
+        self._api_factory = api_factory
         self._api = None
         self._failed = False
+
+    def _make_api(self) -> Any:
+        if self._api_factory is not None:
+            return self._api_factory()
+        from pytr.api import TradeRepublicApi  # type: ignore
+
+        return TradeRepublicApi(phone_no=self._phone, pin=self._pin, save_cookies=True)
 
     def _login(self):
         if self._api is not None or self._failed:
             return self._api
         try:
-            from pytr.api import TradeRepublicApi  # type: ignore
-
-            api = TradeRepublicApi(phone_no=self._phone, pin=self._pin,
-                                   save_cookies=True)
-            # Reuses the stored session cookie when present; a fresh pairing
-            # requires interactive 2FA once (run `pytr login` manually).
-            api.login()
+            api = self._make_api()
+            # pytr>=0.4 dropped the old `.login()` method. The correct
+            # non-interactive flow (mirroring pytr's own `account.login()`
+            # reference implementation) is: try to resume the session cookie
+            # saved by a prior interactive `pytr login`. If that fails there
+            # is no cached session to resume, and the fresh-pairing flow
+            # (initiate_weblogin -> wait for a 2FA code -> complete_weblogin)
+            # needs interactive input we must never block on here — so we
+            # degrade instead, same as any other unavailable-provider case.
+            if not api.resume_websession():
+                log.warning(
+                    "TR session not resumable — run `pytr login` interactively "
+                    "once on this machine to (re)pair, then restart LMTrade. "
+                    "Falling back to synthetic instruments for now.")
+                self._failed = True
+                return None
             self._api = api
         except Exception as exc:  # noqa: BLE001
             log.warning("TR derivatives unavailable (%s) — falling back to "
@@ -112,6 +138,30 @@ class PytrDerivatives(TRDerivativesBase):
     def available(self) -> bool:
         return self._login() is not None
 
+    async def _resolve_isin(self, api: Any, underlying: str) -> str | None:
+        """TR's derivative search takes an ISIN, not a ticker — look the
+        underlying up first via TR's own instrument search."""
+        sub_id = await api.search(underlying, asset_type="stock")
+        _, _, payload = await api.recv()
+        await api.unsubscribe(sub_id)
+        for result in (payload or {}).get("results", []):
+            isin = result.get("isin")
+            if isin:
+                return isin
+        return None
+
+    async def _fetch_derivatives(self, api: Any, isin: str) -> list[dict]:
+        # "knockout" is the best-effort productCategory value (TR's own app
+        # terminology) — this environment cannot reach TR's live websocket
+        # API to verify the exact request/response schema against a real
+        # account. debug-logging the raw payload here so a live run can
+        # confirm/correct it quickly if this comes back empty in practice.
+        sub_id = await api.search_derivative(isin, "knockout")
+        _, _, payload = await api.recv()
+        await api.unsubscribe(sub_id)
+        log.debug("TR search_derivative(%s, knockout) -> %r", isin, payload)
+        return (payload or {}).get("results", [])
+
     def search(self, underlying: str, direction: str) -> list[TRDerivativeQuote]:
         api = self._login()
         if api is None:
@@ -119,22 +169,22 @@ class PytrDerivatives(TRDerivativesBase):
         try:
             import asyncio
 
-            async def _query():
-                # TR's derivative search: knock-out products for an underlying,
-                # long or short. Field names tolerant to pytr/API versions.
-                sub_id = await api.derivative_search(
-                    underlying, product_category="knockOutProduct",
-                    direction="long" if direction == "buy" else "short")
-                _, _, payload = await api.recv()
-                await api.unsubscribe(sub_id)
-                return payload
+            async def _query() -> list[dict]:
+                isin = await self._resolve_isin(api, underlying)
+                if isin is None:
+                    return []
+                return await self._fetch_derivatives(api, isin)
 
-            payload = asyncio.get_event_loop().run_until_complete(_query())
+            items = asyncio.get_event_loop().run_until_complete(_query())
             out: list[TRDerivativeQuote] = []
-            for item in (payload or {}).get("results", []):
+            for item in items:
                 try:
                     out.append(TRDerivativeQuote(
                         isin=item["isin"], underlying=underlying,
+                        # Every result from this query is labeled with the
+                        # requested direction rather than an actual call/put
+                        # field from the response (unconfirmed field name) —
+                        # a pre-existing simplification, not new here.
                         kind="ko_call" if direction == "buy" else "ko_put",
                         strike=float(item["strike"]),
                         barrier=float(item.get("barrier", item["strike"])),
