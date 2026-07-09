@@ -55,8 +55,12 @@ function paintSummary(s) {
   $("net").textContent = fmt(net) + " " + cur;
   const pnlEl = $("pnl");
   pnlEl.textContent = (pnl >= 0 ? "▲ " : "▼ ") + fmt(pnl) + " " + cur + " P&L";
-  pnlEl.className = "sub " + (pnl >= 0 ? "" : "");
-  $("net").className = "v " + (pnl >= 0 ? "pos" : "neg");
+  pnlEl.className = "sub";
+  // Net worth is red while mark-to-market sits below the last REALIZED net
+  // worth (the value locked in at the most recent closed trade), green at or
+  // above. Falls back to starting cash before any trade closes.
+  const mark = s.last_realized_net_worth != null ? s.last_realized_net_worth : (s.starting_cash || 0);
+  $("net").className = "v " + (net < mark - 1e-9 ? "neg" : "pos");
 
   $("cash").textContent = fmt(s.cash) + " " + cur;
   $("reserve").textContent = fmt(s.reserve != null ? s.reserve : (econ.reserve_eur || 0)) + " " + cur;

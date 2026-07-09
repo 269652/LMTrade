@@ -338,6 +338,13 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def closed_options_count(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM option_positions WHERE status='closed'"
+            ).fetchone()
+        return int(row["c"])
+
     def closed_options(self, limit: int = 200) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(

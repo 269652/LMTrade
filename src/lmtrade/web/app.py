@@ -113,6 +113,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "equity": round(equity, 4),
             "reserve": round(store.reserve_balance(), 4),
             "tr_account_cash": store.get_meta("tr_account_cash"),
+            "last_realized_net_worth": store.get_meta("last_realized_net_worth"),
             "starting_cash": store.get_meta("starting_cash", settings.budget),
             "economics": econ,
             "positions": rows,

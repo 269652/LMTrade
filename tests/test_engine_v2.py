@@ -186,6 +186,36 @@ class TestOptionMarkPersistence:
         assert "mark_premium" in row
 
 
+class TestRealizedNetWorthMark:
+    """last_realized_net_worth is a realized high-water mark: net worth locked
+    in at the most recent closed trade, reset on each close."""
+
+    def test_initializes_to_starting_cash(self, settings, store):
+        engine = make_engine(settings, store)
+        engine.run_cycle()
+        assert store.get_meta("last_realized_net_worth") == pytest.approx(settings.budget)
+
+    def test_resets_mark_on_realized_close(self, settings, store):
+        # An option whose stop-loss is set absurdly high closes immediately
+        # this cycle (mark <= sl), realizing a loss.
+        store.open_option("AAPL", "call", strike=100.0, expiry_ts=4e12, iv=0.2,
+                          contracts=1.0, entry_premium=1.0, genome_id=None,
+                          tp_premium=1e9, sl_premium=1e9)
+        engine = make_engine(settings, store)
+        engine.run_cycle()
+        assert store.closed_options_count() == 1
+        econ = store.get_meta("economics")
+        assert store.get_meta("last_realized_net_worth") == pytest.approx(
+            econ["net_worth_eur"])
+
+    def test_mark_unchanged_without_a_close(self, settings, store):
+        engine = make_engine(settings, store)
+        engine.run_cycle()
+        first = store.get_meta("last_realized_net_worth")
+        engine.run_cycle()   # no close happened
+        assert store.get_meta("last_realized_net_worth") == first
+
+
 class TestBookFullVisibility:
     """When every position slot is taken, the engine skips the whole
     decision/entry step and previously logged nothing but economics — which

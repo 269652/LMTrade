@@ -183,6 +183,22 @@ class Engine:
                 self.bus.info("[research] daily analysis unavailable or no change",
                               source="research")
 
+    def _update_realized_mark(self, net_worth: float) -> None:
+        """Maintain `last_realized_net_worth`: the net worth locked in at the
+        most recent REALIZED (closed) trade. The dashboard colors net worth
+        red while the live mark-to-market value sits below this, green at or
+        above — a realized high-water mark that resets each time a position
+        closes (win or loss)."""
+        if self.store.get_meta("last_realized_net_worth") is None:
+            self.store.set_meta(
+                "last_realized_net_worth",
+                float(self.store.get_meta("starting_cash", self.settings.budget)))
+        closed = self.store.closed_options_count()
+        if closed > int(self.store.get_meta("realized_close_count", 0)):
+            # A trade just realized — reset the mark to the current net worth.
+            self.store.set_meta("last_realized_net_worth", round(net_worth, 6))
+            self.store.set_meta("realized_close_count", closed)
+
     # ---------------------------------------------------------------- benchmark
     def _update_benchmark(self, prices: dict[str, float]) -> None:
         sym = self.settings.benchmark.symbol
@@ -513,6 +529,7 @@ class Engine:
                 self.store.set_meta("tr_account_cash", tr_cash)
         econ = self.accountant.snapshot(cash, total_value, self.store.reserve_balance())
         self.store.set_meta("economics", econ.as_dict())
+        self._update_realized_mark(econ.net_worth_eur)
         self._update_benchmark(prices)
         self.bus.activity(
             "economics",
