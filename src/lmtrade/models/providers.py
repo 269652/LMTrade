@@ -11,6 +11,7 @@ signal when their key/host is missing, so the stack never blocks the loop.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -19,7 +20,10 @@ from typing import Callable
 import httpx
 
 from ..config import Settings, secret
+from ..logging_setup import get_logger
 from .base import ModelProvider, Signal
+
+log = get_logger("lmtrade.models")
 
 CLAUDE_CLI_TIMEOUT = 60.0
 CLAUDE_CLI_BIN = "claude"
@@ -168,15 +172,32 @@ class CloudLLMProvider(ModelProvider):
 
 def _default_claude_cli_runner(prompt: str, timeout: float = CLAUDE_CLI_TIMEOUT) -> str:
     """Run a prompt through the locally-installed Claude Code CLI in
-    non-interactive print mode and return its stdout. WebSearch is
-    pre-authorized (headless mode can't answer interactive permission
-    prompts) so research/analysis prompts get live results, not just the
-    model's static training-cutoff knowledge."""
+    non-interactive print mode and return its stdout.
+
+    Two things this gets right that the naive `subprocess.run(["claude", "-p",
+    prompt, ...])` did not, both of which broke it on Windows (where it failed
+    instantly and the empty/error output was silently stored as "neutral"
+    news):
+
+    - The prompt goes in via **stdin**, never as an argv element. It contains
+      shell metacharacters — the sentiment scale is literally
+      `bullish|bearish|neutral` — which a shell would mangle. `claude -p`
+      reads the prompt from stdin when none is given positionally.
+    - On Windows the `claude` on PATH is a `.cmd` shim, which CreateProcess
+      cannot execute directly; it must be run through `cmd /c`. We resolve the
+      real path with shutil.which (honors PATHEXT) and wrap it.
+
+    WebSearch is pre-authorized because headless mode can't answer interactive
+    permission prompts, so research/analysis prompts get live web results, not
+    just the model's static training-cutoff knowledge."""
+    exe = shutil.which(CLAUDE_CLI_BIN) or CLAUDE_CLI_BIN
+    args = ["-p", "--output-format", "text", "--allowedTools", "WebSearch"]
+    if os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
+        cmd = ["cmd", "/c", exe, *args]
+    else:
+        cmd = [exe, *args]
     result = subprocess.run(
-        [CLAUDE_CLI_BIN, "-p", prompt,
-         "--output-format", "text",
-         "--allowedTools", "WebSearch"],
-        capture_output=True, text=True, timeout=timeout,
+        cmd, input=prompt, capture_output=True, text=True, timeout=timeout,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"claude CLI exited {result.returncode}")
@@ -217,13 +238,23 @@ class ClaudeCLIProvider(ModelProvider):
         return _parse_decision(text, self.name, 0.0)
 
     def research(self, symbol: str) -> tuple[str, float]:
+        if not self.available():
+            return "", 0.0
         prompt = (
             f"Use web search to find today's actual market-moving news for "
             f"{symbol} — do not rely on prior/training knowledge, the market "
             f"has moved since then. In 3 sentences: summarize what you find "
             f"and its sentiment. End with SENTIMENT: bullish|bearish|neutral."
         )
-        return self.ask(prompt)
+        try:
+            return self._runner(prompt, self.timeout), 0.0
+        except Exception as exc:  # noqa: BLE001
+            # Return empty (not error text) so a failed CLI call is *skipped*
+            # by NewsService rather than stored as a bogus "neutral" news item
+            # that then serves from cache for the whole freshness window. Log
+            # loudly so the failure is diagnosable instead of silent.
+            log.warning("claude CLI research failed for %s: %s", symbol, exc)
+            return "", 0.0
 
 
 class PerplexityProvider(ModelProvider):

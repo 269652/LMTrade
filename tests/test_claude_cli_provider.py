@@ -29,31 +29,71 @@ class FakeCompletedProcess:
 
 
 class TestDefaultClaudeCLIRunner:
-    """The runner must give the CLI live web-search access — otherwise
-    "news"/"analysis" prompts only get the model's static training-cutoff
-    knowledge, not real current events."""
+    """The runner must (a) give the CLI live web-search access — otherwise
+    news/analysis prompts get only static training knowledge, not real
+    current events — and (b) invoke the CLI in a way that actually works on
+    Windows, where `claude` is a `.cmd` shim and the prompt contains shell
+    metacharacters (the sentiment scale literally includes `|`)."""
 
-    def test_invokes_claude_with_web_search_preauthorized(self, monkeypatch):
+    def _patch(self, monkeypatch, which="/usr/bin/claude", os_name="posix"):
         captured = {}
 
-        def fake_run(cmd, capture_output, text, timeout):
+        def fake_run(cmd, **kwargs):
             captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
             return FakeCompletedProcess(stdout="some real-time result")
 
+        monkeypatch.setattr("lmtrade.models.providers.shutil.which", lambda n: which)
+        monkeypatch.setattr("lmtrade.models.providers.os.name", os_name)
         monkeypatch.setattr("lmtrade.models.providers.subprocess.run", fake_run)
+        return captured
+
+    def test_web_search_preauthorized(self, monkeypatch):
+        captured = self._patch(monkeypatch)
         out = _default_claude_cli_runner("what's the latest AAPL news?")
         assert out == "some real-time result"
         cmd = captured["cmd"]
-        assert cmd[0] == CLAUDE_CLI_BIN
-        assert "-p" in cmd
         assert "--allowedTools" in cmd
-        idx = cmd.index("--allowedTools")
-        assert "WebSearch" in cmd[idx + 1]
+        assert cmd[cmd.index("--allowedTools") + 1] == "WebSearch"
+
+    def test_prompt_passed_via_stdin_not_argv(self, monkeypatch):
+        # The prompt (which contains `|`, quotes, etc.) must go via stdin so
+        # no shell can mangle it — passing it as an argv element is exactly
+        # what broke on Windows.
+        captured = self._patch(monkeypatch)
+        prompt = "sentiment scale is bullish|bearish|neutral"
+        _default_claude_cli_runner(prompt)
+        assert captured["kwargs"]["input"] == prompt
+        assert prompt not in " ".join(captured["cmd"])
+
+    def test_uses_resolved_path_from_which(self, monkeypatch):
+        captured = self._patch(monkeypatch, which="/opt/tools/claude")
+        _default_claude_cli_runner("p")
+        assert captured["cmd"][0] == "/opt/tools/claude"
+
+    def test_windows_cmd_shim_wrapped_in_cmd_c(self, monkeypatch):
+        captured = self._patch(
+            monkeypatch, which=r"C:\Users\x\AppData\npm\claude.cmd", os_name="nt")
+        _default_claude_cli_runner("p")
+        assert captured["cmd"][:2] == ["cmd", "/c"]
+        assert captured["cmd"][2].lower().endswith("claude.cmd")
+
+    def test_posix_not_wrapped(self, monkeypatch):
+        captured = self._patch(monkeypatch, which="/usr/bin/claude", os_name="posix")
+        _default_claude_cli_runner("p")
+        assert captured["cmd"][0] == "/usr/bin/claude"
+        assert "cmd" not in captured["cmd"]
+
+    def test_falls_back_to_bare_name_when_which_returns_none(self, monkeypatch):
+        captured = self._patch(monkeypatch, which=None)
+        _default_claude_cli_runner("p")
+        assert captured["cmd"][0] == CLAUDE_CLI_BIN
 
     def test_raises_on_nonzero_exit(self, monkeypatch):
+        monkeypatch.setattr("lmtrade.models.providers.shutil.which", lambda n: "/usr/bin/claude")
         monkeypatch.setattr(
             "lmtrade.models.providers.subprocess.run",
-            lambda *a, **k: FakeCompletedProcess(returncode=1, stderr="boom"),
+            lambda cmd, **k: FakeCompletedProcess(returncode=1, stderr="boom"),
         )
         with pytest.raises(RuntimeError, match="boom"):
             _default_claude_cli_runner("prompt")
@@ -118,6 +158,23 @@ class TestClaudeCLIProvider:
     def test_research_empty_when_binary_missing(self, monkeypatch):
         monkeypatch.setattr("lmtrade.models.providers.shutil.which", lambda name: None)
         provider = ClaudeCLIProvider(runner=lambda p, t: "unused")
+        text, cost = provider.research("AAPL")
+        assert text == ""
+        assert cost == 0.0
+
+    def test_research_failure_returns_empty_not_error_text(self, monkeypatch):
+        # A crashing CLI must NOT hand back error text — NewsService would
+        # store it as a news item and _parse_sentiment would call it
+        # "neutral", silently poisoning the cache with fake neutral news for
+        # the whole freshness window. Empty => the fetch is skipped instead.
+        monkeypatch.setattr(
+            "lmtrade.models.providers.shutil.which", lambda name: "/usr/bin/claude"
+        )
+
+        def failing(prompt, timeout):
+            raise RuntimeError("subprocess exploded")
+
+        provider = ClaudeCLIProvider(runner=failing)
         text, cost = provider.research("AAPL")
         assert text == ""
         assert cost == 0.0
