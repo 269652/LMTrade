@@ -23,7 +23,7 @@ WORKTREE_DIR="$(mktemp -d)"
 cleanup() { git worktree remove "$WORKTREE_DIR" --force >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-git worktree add "$WORKTREE_DIR" "origin/$STATE_BRANCH" >/dev/null
+git worktree add -B "$STATE_BRANCH" "$WORKTREE_DIR" "origin/$STATE_BRANCH" >/dev/null
 
 mkdir -p data
 if [ -f "$WORKTREE_DIR/$STATE_FILE" ]; then
