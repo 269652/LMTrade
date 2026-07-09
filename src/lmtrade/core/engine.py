@@ -134,6 +134,9 @@ class Engine:
         marks: dict[str, dict] = {}
         for o in self.store.open_options():
             spot = prices.get(o["underlying"])
+            # Fall back to last-known price if no fresh quote this cycle
+            if spot is None:
+                spot = self._last_good_price.get(o["underlying"])
             if spot is None:
                 continue
             mark = self._mark_position(o, spot)
