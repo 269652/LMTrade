@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +26,15 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "default.yaml"
 DEFAULT_TOML_PATH = REPO_ROOT / "config.toml"
 
 
+_INLINE_COMMENT_RE = re.compile(r"\s#.*$")
+
+
 def _load_dotenv(path: Path) -> None:
-    """Minimal .env loader (avoids a hard python-dotenv dependency)."""
+    """Minimal .env loader (avoids a hard python-dotenv dependency).
+    Strips trailing ` # comment` from values (only when '#' is preceded by
+    whitespace, so values legitimately containing '#' are left alone) —
+    .env.example documents several keys as `KEY=            # hint`, and
+    filling in the value in place must not glue the hint onto it."""
     if not path.exists():
         return
     for raw in path.read_text().splitlines():
@@ -34,6 +42,7 @@ def _load_dotenv(path: Path) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
+        value = _INLINE_COMMENT_RE.sub("", value)
         key, value = key.strip(), value.strip().strip('"').strip("'")
         os.environ.setdefault(key, value)
 

@@ -4,11 +4,12 @@ environment variables in precedence. Lets a fork be configured without
 editing tracked files. Written before implementation per strict TDD."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-from lmtrade.config import load_settings
+from lmtrade.config import _load_dotenv, load_settings
 
 
 @pytest.fixture()
@@ -91,3 +92,37 @@ class TestResearchProviderEnvOverrides:
         s = load_settings(config_path=yaml_path, load_env=False)
         assert s.research.news_provider == "perplexity"
         assert s.research.analysis_provider == "anthropic"
+
+
+class TestDotenvLoader:
+    """.env.example ships several KEY=            # comment lines (e.g.
+    TR_PHONE, TR_PIN) so a user filling in the value in place — the most
+    natural edit — must not have the trailing comment become part of the
+    value."""
+
+    def _load_isolated(self, monkeypatch, env_path: Path, *keys: str) -> None:
+        for k in keys:
+            monkeypatch.delenv(k, raising=False)
+        _load_dotenv(env_path)
+
+    def test_strips_trailing_inline_comment(self, tmp_path, monkeypatch):
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "TR_PHONE=+491511234567            # +49...\n"
+            "TR_PIN=1234              # 4-digit app PIN\n"
+        )
+        self._load_isolated(monkeypatch, env_path, "TR_PHONE", "TR_PIN")
+        assert os.environ["TR_PHONE"] == "+491511234567"
+        assert os.environ["TR_PIN"] == "1234"
+
+    def test_value_without_comment_is_unaffected(self, tmp_path, monkeypatch):
+        env_path = tmp_path / ".env"
+        env_path.write_text("LMTRADE_BUDGET=250\n")
+        self._load_isolated(monkeypatch, env_path, "LMTRADE_BUDGET")
+        assert os.environ["LMTRADE_BUDGET"] == "250"
+
+    def test_full_line_comment_still_skipped(self, tmp_path, monkeypatch):
+        env_path = tmp_path / ".env"
+        env_path.write_text("# LMTRADE_BUDGET=999\nLMTRADE_BUDGET=50\n")
+        self._load_isolated(monkeypatch, env_path, "LMTRADE_BUDGET")
+        assert os.environ["LMTRADE_BUDGET"] == "50"

@@ -8,6 +8,7 @@ key)."""
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from ..config import Settings, secret
@@ -66,3 +67,15 @@ class NewsService:
         sentiment = _parse_sentiment(text)
         self.store.add_news(symbol, text, sentiment, ts=self.now())
         return {"symbol": symbol, "text": text, "sentiment": sentiment, "ts": self.now()}
+
+    def get_many(self, symbols: list[str], max_workers: int = 8) -> dict[str, dict | None]:
+        """Fetch news for many symbols in parallel, bounded by max_workers —
+        a sequential per-symbol loop is impractical once the fetcher has real
+        per-call latency (e.g. a claude CLI subprocess doing a web search)
+        across a large universe. A failing symbol resolves to whatever get()
+        would have returned (cache or None) without affecting the others."""
+        if not symbols:
+            return {}
+        with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(symbols)))) as pool:
+            results = list(pool.map(self.get, symbols))
+        return dict(zip(symbols, results))

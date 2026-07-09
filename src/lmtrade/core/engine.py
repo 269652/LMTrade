@@ -128,8 +128,10 @@ class Engine:
     def _run_scheduled_jobs(self) -> None:
         news_iv = self.settings.research.news_interval_minutes * 60
         if self.scheduler.due("news", news_iv):
+            results = self.news.get_many(
+                self.settings.universe, max_workers=min(8, len(self.settings.universe)))
             for symbol in self.settings.universe:
-                item = self.news.get(symbol)
+                item = results.get(symbol)
                 if item:
                     self.bus.activity(
                         "signal", f"news {symbol}: {item['sentiment']}", symbol,

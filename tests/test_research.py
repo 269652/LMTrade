@@ -87,6 +87,48 @@ class TestNewsService:
         svc = NewsService(store, settings, fetcher=None)
         assert svc.get("AAPL") is None               # no key, no crash
 
+
+class TestNewsServiceConcurrentFetch:
+    """get_many fetches the whole universe in parallel, bounded by
+    max_workers — a sequential per-symbol loop is impractical once a fetcher
+    has real per-call latency (e.g. a claude CLI subprocess with web search)
+    across a 30-symbol universe."""
+
+    def test_get_many_fetches_all_symbols(self, store, settings):
+        calls = []
+
+        def fake_fetch(symbol):
+            calls.append(symbol)
+            return f"{symbol} update. SENTIMENT: neutral", 0.0
+
+        svc = NewsService(store, settings, fetcher=fake_fetch)
+        results = svc.get_many(["AAPL", "MSFT", "SPY"])
+        assert set(results.keys()) == {"AAPL", "MSFT", "SPY"}
+        assert all(results[s]["sentiment"] == "neutral" for s in results)
+        assert sorted(calls) == ["AAPL", "MSFT", "SPY"]
+
+    def test_get_many_runs_concurrently_not_sequentially(self, store, settings):
+        import time
+
+        def slow_fetch(symbol):
+            time.sleep(0.2)
+            return f"{symbol}. SENTIMENT: neutral", 0.0
+
+        svc = NewsService(store, settings, fetcher=slow_fetch)
+        symbols = [f"SYM{i}" for i in range(6)]
+        start = time.time()
+        svc.get_many(symbols, max_workers=6)
+        elapsed = time.time() - start
+        assert elapsed < 0.8   # sequential would be ~1.2s; concurrent ~0.2s
+
+    def test_get_many_empty_list(self, store, settings):
+        svc = NewsService(store, settings, fetcher=lambda s: ("x", 0.0))
+        assert svc.get_many([]) == {}
+
+    def test_get_many_handles_missing_fetcher(self, store, settings):
+        svc = NewsService(store, settings, fetcher=None)
+        assert svc.get_many(["AAPL", "MSFT"]) == {"AAPL": None, "MSFT": None}
+
     def test_fetch_cost_recorded(self, store, settings):
         svc = NewsService(store, settings,
                           fetcher=lambda s: ("x. SENTIMENT: neutral", 0.005))
