@@ -70,3 +70,24 @@ class TestTomlOverrideLayer:
         toml_path.write_text("this is not valid toml [[[")
         s = load_settings(config_path=yaml_path, toml_path=toml_path, load_env=False)
         assert s.budget == 100.0  # falls back to yaml, doesn't crash
+
+
+class TestResearchProviderEnvOverrides:
+    """LMTRADE_NEWS_PROVIDER / LMTRADE_ANALYSIS_PROVIDER let a fully-local
+    setup switch news/analysis to the local `claude` CLI via .env alone,
+    without needing a config.toml."""
+
+    def test_news_provider_env_override(self, tmp_path, yaml_path, monkeypatch):
+        monkeypatch.setenv("LMTRADE_NEWS_PROVIDER", "claude_cli")
+        s = load_settings(config_path=yaml_path, load_env=False)
+        assert s.research.news_provider == "claude_cli"
+
+    def test_analysis_provider_env_override(self, tmp_path, yaml_path, monkeypatch):
+        monkeypatch.setenv("LMTRADE_ANALYSIS_PROVIDER", "claude_cli")
+        s = load_settings(config_path=yaml_path, load_env=False)
+        assert s.research.analysis_provider == "claude_cli"
+
+    def test_defaults_unchanged_without_env(self, tmp_path, yaml_path, monkeypatch):
+        s = load_settings(config_path=yaml_path, load_env=False)
+        assert s.research.news_provider == "perplexity"
+        assert s.research.analysis_provider == "anthropic"

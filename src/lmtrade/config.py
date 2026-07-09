@@ -86,6 +86,12 @@ class LoopConfig(BaseModel):
 class ResearchConfig(BaseModel):
     news_interval_minutes: int = 60          # hourly Perplexity news
     daily_analysis_interval_hours: int = 24  # daily Claude strategy review
+    # "perplexity" (needs PERPLEXITY_API_KEY) or "claude_cli" (local `claude`
+    # CLI, no API key — runs entirely on the local machine).
+    news_provider: str = "perplexity"
+    # "anthropic" (needs ANTHROPIC_API_KEY) or "claude_cli" (local `claude`
+    # CLI, no API key).
+    analysis_provider: str = "anthropic"
 
 
 class OptionsConfig(BaseModel):
@@ -198,6 +204,10 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         cfg.setdefault("model", {})["cloud_model"] = v
     if v := env("LMTRADE_PERPLEXITY_MODEL"):
         cfg.setdefault("model", {})["perplexity_model"] = v
+    if v := env("LMTRADE_NEWS_PROVIDER"):
+        cfg.setdefault("research", {})["news_provider"] = v
+    if v := env("LMTRADE_ANALYSIS_PROVIDER"):
+        cfg.setdefault("research", {})["analysis_provider"] = v
     if v := env("LMTRADE_GPU_USD_PER_HOUR"):
         cfg.setdefault("economics", {})["gpu_usd_per_hour"] = float(v)
     if v := env("LMTRADE_MIN_RUNWAY_HOURS"):

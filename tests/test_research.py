@@ -127,3 +127,55 @@ class TestDailyAnalyst:
     def test_no_caller_and_no_key_degrades(self, store, settings):
         analyst = DailyAnalyst(store, settings, caller=None)
         assert analyst.run() is None
+
+
+class TestNewsServiceClaudeCLI:
+    """research.news_provider = 'claude_cli' runs research through a local
+    `claude` CLI instead of the Perplexity API — no key needed, everything
+    local. Offline: the CLI subprocess is always faked."""
+
+    def test_uses_claude_cli_when_configured_and_available(self, store, settings, monkeypatch):
+        settings.research.news_provider = "claude_cli"
+        monkeypatch.setattr(
+            "lmtrade.models.providers.shutil.which", lambda name: "/usr/bin/claude"
+        )
+        monkeypatch.setattr(
+            "lmtrade.models.providers._default_claude_cli_runner",
+            lambda prompt, timeout: "AAPL steady. SENTIMENT: neutral",
+        )
+        svc = NewsService(store, settings)
+        item = svc.get("AAPL")
+        assert item is not None
+        assert item["sentiment"] == "neutral"
+
+    def test_claude_cli_configured_but_binary_missing_degrades(self, store, settings, monkeypatch):
+        settings.research.news_provider = "claude_cli"
+        monkeypatch.setattr("lmtrade.models.providers.shutil.which", lambda name: None)
+        svc = NewsService(store, settings)
+        assert svc.get("AAPL") is None
+
+
+class TestDailyAnalystClaudeCLI:
+    """research.analysis_provider = 'claude_cli' runs the daily review through
+    a local `claude` CLI instead of the Anthropic API — no key needed."""
+
+    def test_uses_claude_cli_when_configured(self, store, settings, monkeypatch):
+        settings.research.analysis_provider = "claude_cli"
+        monkeypatch.setattr(
+            "lmtrade.models.providers.shutil.which", lambda name: "/usr/bin/claude"
+        )
+        response = json.dumps({"risk": {"stop_loss_pct": 0.04}, "notes": "trim risk"})
+        monkeypatch.setattr(
+            "lmtrade.models.providers._default_claude_cli_runner",
+            lambda prompt, timeout: response,
+        )
+        analyst = DailyAnalyst(store, settings)
+        result = analyst.run()
+        assert result is not None
+        assert settings.risk.stop_loss_pct == pytest.approx(0.04)
+
+    def test_claude_cli_configured_but_missing_binary_degrades(self, store, settings, monkeypatch):
+        settings.research.analysis_provider = "claude_cli"
+        monkeypatch.setattr("lmtrade.models.providers.shutil.which", lambda name: None)
+        analyst = DailyAnalyst(store, settings, caller=None)
+        assert analyst.run() is None

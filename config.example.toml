@@ -21,7 +21,10 @@ universe = [                 # instruments to trade — see config/default.yaml
 ]
 
 [loop]
-interval_seconds = 15        # seconds between trading cycles within a run
+interval_seconds = 45        # seconds between trading cycles within a run
+                              # (30-60s = continuous local trading; the
+                              # hourly-Routine deployment overrides this via
+                              # LMTRADE_HOURLY_INTERVAL instead)
 max_positions = 8            # cap on concurrent open positions
 max_new_positions_per_cycle = 0   # cap NEW entries per cycle ("trades per
                                   # hour" = this x cycles-per-hourly-run;
@@ -85,5 +88,16 @@ provider = "auto"             # auto | yahoo | synthetic
 intraday = true
 
 [research]
-news_interval_minutes = 60
-daily_analysis_interval_hours = 24
+news_interval_minutes = 60           # hourly news
+daily_analysis_interval_hours = 24   # daily strategy review
+news_provider = "perplexity"         # perplexity | claude_cli (local, no key)
+analysis_provider = "anthropic"      # anthropic | claude_cli (local, no key)
+
+# Fully-local example: no ANTHROPIC_API_KEY / PERPLEXITY_API_KEY needed —
+# news, daily analysis and decision-making all run through your local
+# `claude` CLI login and/or a local Ollama SLM.
+#[model]
+#stack = ["heuristic", "slm", "claude_cli"]
+#[research]
+#news_provider = "claude_cli"
+#analysis_provider = "claude_cli"

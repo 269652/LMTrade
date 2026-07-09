@@ -12,7 +12,7 @@ from typing import Callable
 
 from ..config import Settings, secret
 from ..core.state import Store
-from ..models.providers import PerplexityProvider
+from ..models.providers import ClaudeCLIProvider, PerplexityProvider
 
 # fetcher(symbol) -> (text, cost_usd)
 Fetcher = Callable[[str], tuple[str, float]]
@@ -37,6 +37,9 @@ class NewsService:
         self.now = now
         if fetcher is not None:
             self.fetcher: Fetcher | None = fetcher
+        elif settings.research.news_provider == "claude_cli":
+            cli = ClaudeCLIProvider(settings)
+            self.fetcher = cli.research if cli.available() else None
         elif secret("PERPLEXITY_API_KEY"):
             provider = PerplexityProvider(settings)
             self.fetcher = provider.research

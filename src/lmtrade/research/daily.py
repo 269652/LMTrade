@@ -16,6 +16,7 @@ import httpx
 
 from ..config import Settings, secret
 from ..core.state import Store
+from ..models.providers import ClaudeCLIProvider
 
 # caller(prompt) -> (response_text, cost_usd)
 Caller = Callable[[str], tuple[str, float]]
@@ -53,11 +54,21 @@ def _anthropic_caller(settings: Settings) -> Caller | None:
     return call
 
 
+def _claude_cli_caller(settings: Settings) -> Caller | None:
+    provider = ClaudeCLIProvider(settings)
+    return provider.ask if provider.available() else None
+
+
 class DailyAnalyst:
     def __init__(self, store: Store, settings: Settings, caller: Caller | None = None):
         self.store = store
         self.settings = settings
-        self.caller = caller if caller is not None else _anthropic_caller(settings)
+        if caller is not None:
+            self.caller = caller
+        elif settings.research.analysis_provider == "claude_cli":
+            self.caller = _claude_cli_caller(settings)
+        else:
+            self.caller = _anthropic_caller(settings)
 
     # -- report building ---------------------------------------------------------
     def build_report(self) -> str:

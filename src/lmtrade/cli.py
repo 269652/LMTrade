@@ -42,12 +42,33 @@ def _banner(settings) -> None:
     ))
 
 
+def _launch_dashboard(settings, host: str, port: int) -> "threading.Thread":
+    """Start the web dashboard in a background daemon thread so a single
+    `lmtrade run` gives you a live local dashboard without a separate
+    `lmtrade web` process. Reads the same on-disk state the engine writes."""
+    import threading
+
+    import uvicorn
+
+    def _serve() -> None:
+        uvicorn.run("lmtrade.web.app:app", host=host, port=port, log_level="warning")
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    return thread
+
+
 @app.command()
 def run(
     cycles: int = typer.Option(0, help="Stop after N cycles (0 = run forever)."),
     interval: int = typer.Option(0, help="Override loop interval seconds (0 = config)."),
+    web: bool = typer.Option(
+        True, "--web/--no-web", help="Also launch the web dashboard in the background."
+    ),
+    web_host: str = typer.Option("", help="Dashboard bind host (default from config)."),
+    web_port: int = typer.Option(0, help="Dashboard bind port (default from config)."),
 ):
-    """Start the trading engine."""
+    """Start the trading engine (and, by default, the web dashboard alongside it)."""
     settings = load_settings()
     if interval > 0:
         settings.loop.interval_seconds = interval
@@ -55,6 +76,11 @@ def run(
     if settings.mode == "live":
         console.print("[bold red]⚠ LIVE mode — real Trade Republic execution. "
                       "This uses an unofficial API against TR's ToS.[/bold red]")
+    if web:
+        h = web_host or settings.web.host
+        p = web_port or settings.web.port
+        _launch_dashboard(settings, h, p)
+        console.print(f"[cyan]Dashboard →[/cyan] http://{h}:{p}")
     store = Store(settings.db_path)
     broker = build_broker(settings, store)
     engine = Engine(settings, store, broker)

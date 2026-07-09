@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
+from typing import Callable
 
 import httpx
 
 from ..config import Settings, secret
 from .base import ModelProvider, Signal
+
+CLAUDE_CLI_TIMEOUT = 60.0
+CLAUDE_CLI_BIN = "claude"
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -160,6 +166,59 @@ class CloudLLMProvider(ModelProvider):
             return Signal(self.name, "hold", 0.5, f"cloud error: {exc}", 0.0)
 
 
+def _default_claude_cli_runner(prompt: str, timeout: float = CLAUDE_CLI_TIMEOUT) -> str:
+    """Run a prompt through the locally-installed Claude Code CLI in
+    non-interactive print mode and return its stdout."""
+    result = subprocess.run(
+        [CLAUDE_CLI_BIN, "-p", prompt, "--output-format", "text"],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"claude CLI exited {result.returncode}")
+    return result.stdout
+
+
+class ClaudeCLIProvider(ModelProvider):
+    """Uses a locally-installed `claude` CLI (Claude Code) instead of the
+    Anthropic HTTP API: no ANTHROPIC_API_KEY, billed through the user's own
+    Claude subscription/login, and everything runs on the local machine.
+    Serves both as a model-stack decision provider (`analyze`) and as a
+    research source (`research`) for the news/daily-analysis services."""
+
+    name = "claude_cli"
+
+    def __init__(self, settings: Settings | None = None,
+                 runner: Callable[[str, float], str] | None = None):
+        self.timeout = CLAUDE_CLI_TIMEOUT
+        self._runner = runner or _default_claude_cli_runner
+
+    def available(self) -> bool:
+        return shutil.which(CLAUDE_CLI_BIN) is not None
+
+    def ask(self, prompt: str) -> tuple[str, float]:
+        """Run a raw prompt through the CLI. Returns (text, cost=0.0) — no
+        per-token API cost is billed here."""
+        if not self.available():
+            return "", 0.0
+        try:
+            return self._runner(prompt, self.timeout), 0.0
+        except Exception as exc:  # noqa: BLE001
+            return f"(claude cli error: {exc})", 0.0
+
+    def analyze(self, symbol: str, context: dict) -> Signal:
+        if not self.available():
+            return Signal(self.name, "hold", 0.5, "claude CLI not found on PATH", 0.0)
+        text, _ = self.ask(_prompt(symbol, context))
+        return _parse_decision(text, self.name, 0.0)
+
+    def research(self, symbol: str) -> tuple[str, float]:
+        prompt = (
+            f"In 3 sentences: latest market-moving news and sentiment for "
+            f"{symbol}. End with SENTIMENT: bullish|bearish|neutral."
+        )
+        return self.ask(prompt)
+
+
 class PerplexityProvider(ModelProvider):
     """Web-grounded research: fetches recent news/sentiment for the instrument."""
 
@@ -217,6 +276,7 @@ def build_providers(settings: Settings) -> dict[str, ModelProvider]:
         "slm": lambda: LocalSLMProvider(settings),
         "cloud": lambda: CloudLLMProvider(settings),
         "perplexity": lambda: PerplexityProvider(settings),
+        "claude_cli": lambda: ClaudeCLIProvider(settings),
     }
     out: dict[str, ModelProvider] = {}
     for name in settings.model.stack:

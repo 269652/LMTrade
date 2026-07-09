@@ -56,8 +56,10 @@ universe:                  # A diversified, TR-realistic universe: US mega-caps,
   - ADA-USD
 
 loop:
-  interval_seconds: 15     # high-cadence intraday loop (TR can't do true HFT;
-                           # sub-second execution is impossible via its API)
+  interval_seconds: 45     # continuous intraday loop, ~once every 30-60s (TR
+                           # can't do true HFT; sub-second execution is
+                           # impossible via its API). Override with
+                           # `lmtrade run --interval N` or config.toml.
   max_positions: 8         # cap concurrent open positions — deliberately far
                            # below universe size; slots go to the strongest
                            # ranked signals across the whole universe each
