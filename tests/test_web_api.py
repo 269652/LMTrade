@@ -77,6 +77,35 @@ class TestInfiniteRunwayJsonSafety:
         assert r.status_code == 200
 
 
+class TestLegacyInfiniteDataJsonSafety:
+    """Activity rows / meta written before the runway_hours-as-None fix (or
+    by any future producer that bypasses EconomicsSnapshot.as_dict()) can
+    still carry a raw float('inf') in their stored JSON — Store round-trips
+    it fine (plain json.dumps/loads allow it), only Starlette's strict
+    JSONResponse rejects it. The API must sanitize at the boundary, not
+    just at the one producer already fixed, so pre-existing data doesn't
+    keep crashing every request."""
+
+    def test_activity_with_raw_infinite_detail_is_json_safe(self, settings, tmp_path):
+        store = Store(settings.db_path)
+        store.add_activity("economics", "legacy poisoned record",
+                            detail={"runway_hours": float("inf")})
+        store.close()
+        client = TestClient(create_app(settings))
+        r = client.get("/api/activity")
+        assert r.status_code == 200
+        assert r.json()[0]["detail"]["runway_hours"] is None
+
+    def test_summary_with_raw_infinite_economics_meta_is_json_safe(self, settings, tmp_path):
+        store = Store(settings.db_path)
+        store.set_meta("economics", {"runway_hours": float("inf")})
+        store.close()
+        client = TestClient(create_app(settings))
+        r = client.get("/api/summary")
+        assert r.status_code == 200
+        assert r.json()["economics"]["runway_hours"] is None
+
+
 class TestNewEndpoints:
     def test_options_endpoint(self, client):
         r = client.get("/api/options")

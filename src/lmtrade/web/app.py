@@ -8,7 +8,9 @@ Run with:  lmtrade web
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -19,6 +21,27 @@ from ..core.state import Store
 
 TEMPLATES = Path(__file__).parent / "templates"
 STATIC = Path(__file__).parent / "static"
+
+
+def _json_safe(obj: Any) -> Any:
+    """Replace any inf/-inf/nan float anywhere in a JSON-able structure with
+    None. Store round-trips those fine (plain json.dumps/loads allow them —
+    e.g. a historical activity/meta row written before a producer started
+    sanitizing its own floats, such as an infinite runway_hours when
+    gpu_usd_per_hour=0), but strict JSON (RFC 8259, no Infinity/NaN) does
+    not, and that's what every response here must produce."""
+    if isinstance(obj, float):
+        return None if math.isinf(obj) or math.isnan(obj) else obj
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
+class SafeJSONResponse(JSONResponse):
+    def render(self, content: Any) -> bytes:
+        return super().render(_json_safe(content))
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -40,7 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         econ = store.get_meta("economics", {})
         curve = store.equity_curve(limit=300)
         equity = curve[-1]["equity"] if curve else cash
-        return JSONResponse({
+        return SafeJSONResponse({
             "mode": store.get_meta("mode", settings.mode),
             "currency": settings.currency,
             "universe": store.get_meta("universe", settings.universe),
@@ -58,27 +81,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/trades")
     def trades(limit: int = 100) -> JSONResponse:
-        return JSONResponse(store.recent_trades(limit))
+        return SafeJSONResponse(store.recent_trades(limit))
 
     @app.get("/api/activity")
     def activity(limit: int = 100) -> JSONResponse:
-        return JSONResponse(store.recent_activity(limit))
+        return SafeJSONResponse(store.recent_activity(limit))
 
     @app.get("/api/logs")
     def logs(limit: int = 200) -> JSONResponse:
-        return JSONResponse(store.recent_logs(limit))
+        return SafeJSONResponse(store.recent_logs(limit))
 
     @app.get("/api/equity")
     def equity() -> JSONResponse:
-        return JSONResponse(store.equity_curve(limit=500))
+        return SafeJSONResponse(store.equity_curve(limit=500))
 
     @app.get("/api/costs")
     def costs() -> JSONResponse:
-        return JSONResponse(store.total_costs())
+        return SafeJSONResponse(store.total_costs())
 
     @app.get("/api/options")
     def options() -> JSONResponse:
-        return JSONResponse({
+        return SafeJSONResponse({
             "open": store.open_options(),
             "closed": store.closed_options(50),
         })
@@ -93,11 +116,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for g in genomes
         ]
         rows.sort(key=lambda r: r["fitness"], reverse=True)
-        return JSONResponse(rows)
+        return SafeJSONResponse(rows)
 
     @app.get("/api/benchmark")
     def benchmark() -> JSONResponse:
-        return JSONResponse({
+        return SafeJSONResponse({
             "curve": store.benchmark_curve(500),
             "alpha": store.get_meta("alpha"),
             "entry": store.get_meta("benchmark_entry"),
@@ -105,7 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/news")
     def news() -> JSONResponse:
-        return JSONResponse(store.recent_news(50))
+        return SafeJSONResponse(store.recent_news(50))
 
     @app.get("/healthz")
     def healthz() -> dict:
