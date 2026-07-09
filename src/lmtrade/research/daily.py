@@ -92,7 +92,9 @@ class DailyAnalyst:
         return (
             "You are the daily strategy reviewer for a small automated paper-trading "
             "bot (~10 EUR account, options + equities, must eventually cover its GPU "
-            "costs). Here is its state and recent performance as JSON:\n\n"
+            "costs). If you have web search available, use it to ground your review "
+            "in today's actual market conditions rather than prior/training "
+            "knowledge. Here is its state and recent performance as JSON:\n\n"
             f"{self.build_report()}\n\n"
             "Suggest conservative adjustments to its risk parameters for the next "
             "24h. Respond ONLY with JSON of the form: "

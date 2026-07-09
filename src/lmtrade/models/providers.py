@@ -168,9 +168,14 @@ class CloudLLMProvider(ModelProvider):
 
 def _default_claude_cli_runner(prompt: str, timeout: float = CLAUDE_CLI_TIMEOUT) -> str:
     """Run a prompt through the locally-installed Claude Code CLI in
-    non-interactive print mode and return its stdout."""
+    non-interactive print mode and return its stdout. WebSearch is
+    pre-authorized (headless mode can't answer interactive permission
+    prompts) so research/analysis prompts get live results, not just the
+    model's static training-cutoff knowledge."""
     result = subprocess.run(
-        [CLAUDE_CLI_BIN, "-p", prompt, "--output-format", "text"],
+        [CLAUDE_CLI_BIN, "-p", prompt,
+         "--output-format", "text",
+         "--allowedTools", "WebSearch"],
         capture_output=True, text=True, timeout=timeout,
     )
     if result.returncode != 0:
@@ -213,8 +218,10 @@ class ClaudeCLIProvider(ModelProvider):
 
     def research(self, symbol: str) -> tuple[str, float]:
         prompt = (
-            f"In 3 sentences: latest market-moving news and sentiment for "
-            f"{symbol}. End with SENTIMENT: bullish|bearish|neutral."
+            f"Use web search to find today's actual market-moving news for "
+            f"{symbol} — do not rely on prior/training knowledge, the market "
+            f"has moved since then. In 3 sentences: summarize what you find "
+            f"and its sentiment. End with SENTIMENT: bullish|bearish|neutral."
         )
         return self.ask(prompt)
 

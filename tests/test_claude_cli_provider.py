@@ -13,7 +13,50 @@ from __future__ import annotations
 import pytest
 
 from lmtrade.config import Settings
-from lmtrade.models.providers import ClaudeCLIProvider, build_providers
+from lmtrade.models.providers import (
+    CLAUDE_CLI_BIN,
+    ClaudeCLIProvider,
+    _default_claude_cli_runner,
+    build_providers,
+)
+
+
+class FakeCompletedProcess:
+    def __init__(self, stdout="", returncode=0, stderr=""):
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+class TestDefaultClaudeCLIRunner:
+    """The runner must give the CLI live web-search access — otherwise
+    "news"/"analysis" prompts only get the model's static training-cutoff
+    knowledge, not real current events."""
+
+    def test_invokes_claude_with_web_search_preauthorized(self, monkeypatch):
+        captured = {}
+
+        def fake_run(cmd, capture_output, text, timeout):
+            captured["cmd"] = cmd
+            return FakeCompletedProcess(stdout="some real-time result")
+
+        monkeypatch.setattr("lmtrade.models.providers.subprocess.run", fake_run)
+        out = _default_claude_cli_runner("what's the latest AAPL news?")
+        assert out == "some real-time result"
+        cmd = captured["cmd"]
+        assert cmd[0] == CLAUDE_CLI_BIN
+        assert "-p" in cmd
+        assert "--allowedTools" in cmd
+        idx = cmd.index("--allowedTools")
+        assert "WebSearch" in cmd[idx + 1]
+
+    def test_raises_on_nonzero_exit(self, monkeypatch):
+        monkeypatch.setattr(
+            "lmtrade.models.providers.subprocess.run",
+            lambda *a, **k: FakeCompletedProcess(returncode=1, stderr="boom"),
+        )
+        with pytest.raises(RuntimeError, match="boom"):
+            _default_claude_cli_runner("prompt")
 
 
 class TestClaudeCLIProvider:
