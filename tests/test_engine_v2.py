@@ -161,3 +161,30 @@ class TestEquityValuation:
         # cash spent on premium must be (approximately) recovered in equity mark
         last = curve[-1]
         assert last["equity"] >= last["cash"]
+
+
+class TestBookFullVisibility:
+    """When every position slot is taken, the engine skips the whole
+    decision/entry step and previously logged nothing but economics — which
+    reads as "stuck / doing nothing". It must say why."""
+
+    def test_full_book_emits_explanatory_log(self, settings, store):
+        settings.loop.max_positions = 2
+        # Fill the book with two open options so no slot is free.
+        for i in range(2):
+            store.open_option(f"SYM{i}", "call", strike=100.0, expiry_ts=4e12,
+                              iv=0.2, contracts=1.0, entry_premium=1.0,
+                              genome_id=None, tp_premium=1.5, sl_premium=0.6)
+        engine = make_engine(settings, store)
+        engine.run_cycle()
+        logs = " ".join(l["message"] for l in store.recent_logs(50))
+        activity = " ".join(a["summary"] for a in store.recent_activity(50))
+        haystack = (logs + " " + activity).lower()
+        assert "no free" in haystack or "full" in haystack
+
+    def test_free_slots_do_not_emit_full_log(self, settings, store):
+        settings.loop.max_positions = 8
+        engine = make_engine(settings, store)
+        engine.run_cycle()
+        logs = " ".join(l["message"] for l in store.recent_logs(50)).lower()
+        assert "no free slot" not in logs

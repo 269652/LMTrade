@@ -68,8 +68,9 @@ function paintSummary(s) {
 
 function paintPositions(rows) {
   $("positions").innerHTML = rows.length
-    ? rows.map(p => `<tr><td>${p.symbol}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.avg_price)}</td></tr>`).join("")
-    : `<tr><td colspan="3" class="muted">No open positions.</td></tr>`;
+    ? rows.map(p => `<tr><td>${p.symbol}</td><td><span class="kind">${p.kind || "equity"}</span></td>`
+        + `<td>${p.isin || "—"}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.avg_price)}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="muted">No open positions.</td></tr>`;
 }
 
 function paintTrades(rows) {

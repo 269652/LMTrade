@@ -58,11 +58,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/summary")
     def summary() -> JSONResponse:
-        positions = store.positions()
+        equity_positions = store.positions()
+        open_opts = store.open_options()
         cash = float(store.get_meta("cash", settings.budget))
         econ = store.get_meta("economics", {})
         curve = store.equity_curve(limit=300)
         equity = curve[-1]["equity"] if curve else cash
+        # Show the FULL book the engine counts toward max_positions: equity
+        # positions AND open options/knockouts. Options were previously
+        # omitted, so an options-only book (the common case) showed "0
+        # positions" even when full. For an option, qty=contracts and
+        # avg_price=entry premium; the real TR ISIN is surfaced when present.
+        rows = [
+            {"symbol": p.symbol, "qty": round(p.qty, 6),
+             "avg_price": round(p.avg_price, 4), "kind": "equity", "isin": None}
+            for p in equity_positions
+        ]
+        for o in open_opts:
+            kind = o.get("instrument_type") or "option"
+            label = f"{o['underlying']} {o.get('kind', '')}".strip()
+            rows.append({
+                "symbol": label,
+                "qty": round(o.get("contracts", 0.0), 6),
+                "avg_price": round(o.get("entry_premium", 0.0), 4),
+                "kind": kind,
+                "isin": o.get("isin"),
+            })
         return SafeJSONResponse({
             "mode": store.get_meta("mode", settings.mode),
             "currency": settings.currency,
@@ -71,12 +92,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "equity": round(equity, 4),
             "starting_cash": store.get_meta("starting_cash", settings.budget),
             "economics": econ,
-            "positions": [
-                {"symbol": p.symbol, "qty": round(p.qty, 6),
-                 "avg_price": round(p.avg_price, 4)}
-                for p in positions
-            ],
-            "num_positions": len(positions),
+            "positions": rows,
+            "num_positions": len(rows),
         })
 
     @app.get("/api/trades")

@@ -49,6 +49,40 @@ class TestExistingEndpoints:
             assert isinstance(r.json(), list)
 
 
+class TestSummaryIncludesOptions:
+    """The engine counts open OPTIONS toward max_positions, but the dashboard
+    summary only counted equity positions — so a book full of options showed
+    "0 positions", which read as broken. Summary must reflect the full book."""
+
+    @pytest.fixture()
+    def options_client(self, tmp_path: Path) -> TestClient:
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        store.open_option("AAPL", "call", strike=100.0, expiry_ts=4e12, iv=0.2,
+                          contracts=3.0, entry_premium=2.5, genome_id=None,
+                          tp_premium=3.75, sl_premium=1.5)
+        store.open_option("NVDA", "put", strike=200.0, expiry_ts=4e12, iv=0.2,
+                          contracts=1.0, entry_premium=4.0, genome_id=None,
+                          tp_premium=6.0, sl_premium=2.4, instrument_type="knockout",
+                          barrier=200.0, ratio=10.0, isin="DE000KO1")
+        store.close()
+        return TestClient(create_app(s))
+
+    def test_num_positions_counts_open_options(self, options_client):
+        s = options_client.get("/api/summary").json()
+        assert s["num_positions"] == 2
+
+    def test_positions_list_includes_options_with_isin(self, options_client):
+        s = options_client.get("/api/summary").json()
+        symbols = {p["symbol"] for p in s["positions"]}
+        assert any("AAPL" in sym for sym in symbols)
+        nvda = next(p for p in s["positions"] if "NVDA" in p["symbol"])
+        assert nvda["isin"] == "DE000KO1"          # real TR knockout surfaced
+        assert nvda["kind"] in ("put", "knockout") or "put" in nvda["symbol"].lower()
+
+
 class TestInfiniteRunwayJsonSafety:
     """gpu_usd_per_hour=0 (no GPU rented) makes runway_hours float('inf') —
     Starlette's JSONResponse (allow_nan=False) crashes on that unless it's

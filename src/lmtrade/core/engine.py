@@ -508,6 +508,14 @@ class Engine:
         else:
             open_count = len(self.store.open_options()) + len(self.store.positions())
             slots = self.settings.loop.max_positions - open_count
+            if slots <= 0:
+                # Book full — the decision/entry step is skipped this cycle.
+                # Say so, otherwise the run looks stuck (only economics lines)
+                # when it's actually just holding a full position book.
+                self.bus.info(
+                    f"position book full ({open_count}/{self.settings.loop.max_positions}) "
+                    f"— no free slots, holding existing positions this cycle",
+                    source="engine")
             candidates: list[tuple[Decision, str | None]] = []
             for symbol in self.settings.universe:
                 if slots <= 0:
