@@ -61,7 +61,7 @@ profit_stash_pct = 0.0       # fraction of realized PROFIT (never losses) on
 
 [learning]
 enabled = true
-population = 8
+population = 14              # ~2 genomes per strategy family
 epsilon = 0.2                # exploration rate for the strategy optimizer
 
 [benchmark]

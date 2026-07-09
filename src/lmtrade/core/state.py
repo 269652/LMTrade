@@ -338,6 +338,14 @@ class Store:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def delete_option(self, opt_id: int) -> None:
+        """Remove an option row entirely — for phantom positions found during
+        live-book reconciliation (never a real fill, so closing it would
+        pollute realized P&L)."""
+        with self._lock:
+            self._conn.execute("DELETE FROM option_positions WHERE id=?", (opt_id,))
+            self._conn.commit()
+
     def closed_options_count(self) -> int:
         with self._lock:
             row = self._conn.execute(

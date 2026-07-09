@@ -52,29 +52,32 @@ class TradeRepublicBroker(Broker):
         user re-runs `pytr login`) is picked up on a later attempt instead of
         disabling live execution permanently."""
         import time
+
+        from .tr_derivatives import drop_shared_api
         self._api = None
         self._next_retry = time.time() + 60.0
+        drop_shared_api(self.phone)
 
     # -- session -------------------------------------------------------------
     def _make_api(self) -> Any:
         if self._api_factory is not None:
             return self._api_factory()
-        from pytr import api as pytr_api  # type: ignore
-
-        from .tr_derivatives import _patch_ws_max_size
-        _patch_ws_max_size(pytr_api.websockets)
-        return pytr_api.TradeRepublicApi(
-            phone_no=self.phone, pin=self.pin, save_cookies=True)
+        # SHARED with the derivatives client: TR allows one active websocket
+        # per session cookie — a second concurrent connection gets HTTP 401.
+        from .tr_derivatives import get_shared_api
+        return get_shared_api(self.phone, self.pin)
 
     def _login(self):
         import time
+
+        from .tr_derivatives import _resume_once
         if self._api is not None:
             return self._api
         if time.time() < self._next_retry:
             return None   # backoff after a recent failure
         try:
             api = self._make_api()
-            if not api.resume_websession():
+            if not _resume_once(api):
                 log.warning("TR live session not resumable — re-run `pytr login "
                             "--store_credentials`; the bot will pick it up on "
                             "its next attempt.")

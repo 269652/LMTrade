@@ -323,7 +323,15 @@ class Engine:
         genome_id = None
         if self.optimizer:
             genome = self.optimizer.select()
-            d, s = genome.signal(quote.history)
+            # Market context for cross-sectional families (xsmom, rel_value):
+            # the whole cycle's histories, set by run_cycle. Kept on self (not
+            # a parameter) so tests stubbing _decide(quote) stay valid.
+            market_ctx = {
+                "symbol": quote.symbol,
+                "histories": getattr(self, "_cycle_histories", {}),
+                "benchmark": self.settings.benchmark.symbol,
+            }
+            d, s = genome.signal(quote.history, market_ctx)
             extra.append(Signal("strategy", d, s,
                                 f"{genome.strategy} {genome.params}", 0.0))
             genome_id = genome.id
@@ -536,6 +544,8 @@ class Engine:
                 symbols, max_workers=min(8, len(symbols)))
         else:
             quotes = {s: self.market.quote(s) for s in symbols}
+        # Cycle-wide histories for cross-sectional strategies (see _decide).
+        self._cycle_histories = {s: q.history for s, q in quotes.items()}
         prices: dict[str, float] = {}     # valuation prices: fresh, or last-known-good
         tradeable: set[str] = set()        # symbols with a FRESH trustworthy quote
         degraded: list[str] = []

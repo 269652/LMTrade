@@ -97,6 +97,25 @@ class TestUCBSelection:
         assert seen == {"a", "b"}                    # pure random hits both
 
 
+class TestFitnessShrinkage:
+    """fitness = pnl / (trades + k): a Bayesian shrinkage prior toward zero so
+    a single lucky trade can't crown a genome over a consistently profitable
+    one with a real sample size."""
+
+    def test_lucky_single_trade_ranks_below_consistent_performer(self):
+        lucky = genome("lucky", trades=1, pnl=6.0, wins=1, win_sum=6.0)
+        steady = genome("steady", trades=10, pnl=30.0, wins=10, win_sum=30.0)
+        # Raw avg: lucky 6.0/trade > steady 3.0/trade. Shrunk: lucky must lose.
+        assert steady.fitness > lucky.fitness
+
+    def test_untried_prior_unchanged(self):
+        assert genome("new").fitness == pytest.approx(0.01)
+
+    def test_sign_preserved(self):
+        assert genome("loser", trades=3, pnl=-3.0).fitness < 0
+        assert genome("winner", trades=3, pnl=3.0).fitness > 0
+
+
 class TestSpeciesProtection:
     def test_sole_family_member_survives_evolution(self, store):
         """The worst genome is the ONLY breakout — replacing it with a

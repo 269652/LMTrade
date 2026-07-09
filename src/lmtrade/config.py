@@ -131,7 +131,7 @@ class OptionsConfig(BaseModel):
 
 class LearningConfig(BaseModel):
     enabled: bool = True
-    population: int = 8
+    population: int = 14   # ~2 genomes per strategy family
     epsilon: float = 0.2
     mutation_scale: float = 0.3
     evolve_every_trades: int = 10      # run evolution after N closed trades

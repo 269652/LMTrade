@@ -217,7 +217,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rows = [
             {"id": g["id"], "strategy": g["strategy"], "params": g["params"],
              "trades": g["trades"], "pnl": round(g["pnl"], 4),
-             "fitness": round(g["pnl"] / g["trades"], 5) if g["trades"] else 0.01}
+             # Same shrunk fitness as the optimizer (see FITNESS_SHRINK_K).
+             "fitness": round(g["pnl"] / (g["trades"] + 2.0), 5) if g["trades"] else 0.01}
             for g in genomes
         ]
         rows.sort(key=lambda r: r["fitness"], reverse=True)

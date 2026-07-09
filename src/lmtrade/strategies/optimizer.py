@@ -22,6 +22,10 @@ from .library import STRATEGIES, signal_for
 
 GENOMES_KEY = "genomes"
 
+# Shrinkage strength for genome fitness (pseudo-trades at zero P&L). ~2 means
+# a 1-trade genome keeps only a third of its raw average.
+FITNESS_SHRINK_K = 2.0
+
 
 @dataclass
 class Genome:
@@ -39,11 +43,14 @@ class Genome:
 
     @property
     def fitness(self) -> float:
-        """Average P&L per trade; unproven genomes get a small optimistic prior
-        so they get explored before being written off."""
+        """Shrunk average P&L per trade: pnl / (trades + FITNESS_SHRINK_K),
+        a Bayesian prior toward zero so one lucky oversized trade can't crown
+        a genome over a consistent performer with a real sample size. Unproven
+        genomes get a small optimistic prior so they get explored before being
+        written off."""
         if self.trades == 0:
             return 0.01
-        return self.pnl / self.trades
+        return self.pnl / (self.trades + FITNESS_SHRINK_K)
 
     @property
     def win_rate(self) -> float:
@@ -58,8 +65,8 @@ class Genome:
     def avg_loss(self) -> float:
         return self.loss_sum / self.losses if self.losses else 0.0
 
-    def signal(self, history: list[float]) -> tuple[str, float]:
-        return signal_for(self.strategy, history, self.params)
+    def signal(self, history: list[float], ctx: dict | None = None) -> tuple[str, float]:
+        return signal_for(self.strategy, history, self.params, ctx)
 
 
 class StrategyOptimizer:

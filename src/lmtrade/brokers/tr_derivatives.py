@@ -41,6 +41,47 @@ log = get_logger("lmtrade.tr")
 WS_MAX_SIZE = 32 * 1024 * 1024
 
 
+# ---------------------------------------------------------------------------
+# Shared pytr session. TR allows ONE active websocket per session cookie: when
+# the live broker and the derivatives client each opened their own
+# TradeRepublicApi, the second connection was rejected with HTTP 401 (observed
+# live: "Connected." followed immediately by a 401 on the next connection).
+# Everything in this process must share a single session per phone number.
+_SHARED_APIS: dict[str, Any] = {}
+
+
+def _new_pytr_api(phone: str, pin: str) -> Any:
+    from pytr import api as pytr_api  # type: ignore
+
+    _patch_ws_max_size(pytr_api.websockets)
+    return pytr_api.TradeRepublicApi(phone_no=phone, pin=pin, save_cookies=True)
+
+
+def get_shared_api(phone: str, pin: str) -> Any:
+    api = _SHARED_APIS.get(phone)
+    if api is None:
+        api = _new_pytr_api(phone, pin)
+        _SHARED_APIS[phone] = api
+    return api
+
+
+def drop_shared_api(phone: str) -> None:
+    """Forget the shared session (stale cookie / websocket error) so the next
+    get re-creates and re-resumes it."""
+    _SHARED_APIS.pop(phone, None)
+
+
+def _resume_once(api: Any) -> bool:
+    """resume_websession() exactly once per shared session — a second resume
+    on an already-live session can rotate tokens under the open websocket."""
+    if getattr(api, "_lmtrade_resumed", False):
+        return True
+    ok = bool(api.resume_websession())
+    if ok:
+        api._lmtrade_resumed = True  # noqa: SLF001
+    return ok
+
+
 def _patch_ws_max_size(ws_module: Any) -> None:
     """Wrap the `connect` attribute of pytr's imported `websockets` module so
     every socket pytr opens defaults to WS_MAX_SIZE instead of the 1 MiB
@@ -109,6 +150,13 @@ class TRDerivativesBase:
         real account."""
         return None
 
+    def portfolio(self) -> list[dict] | None:
+        """Real TR portfolio positions [{isin, size, avg_price}] — None when
+        unavailable (no real account / session down), NEVER an empty list on
+        failure: [] means 'the account truly holds nothing' and callers may
+        reconcile (delete local rows) against it."""
+        return None
+
     def find_knockout(self, underlying: str, direction: str, spot: float,
                       target_leverage: float) -> TRDerivativeQuote | None:
         """Best instrument = tradeable leverage closest to target, within the
@@ -167,17 +215,12 @@ class PytrDerivatives(TRDerivativesBase):
         attempt re-resumes and the bot recovers without a restart."""
         self._api = None
         self._next_retry = self._now() + self._retry_backoff_s
+        drop_shared_api(self._phone)   # stale for every consumer of the session
 
     def _make_api(self) -> Any:
         if self._api_factory is not None:
             return self._api_factory()
-        from pytr import api as pytr_api  # type: ignore
-
-        # Raise pytr's websocket message cap before any connection is opened,
-        # so a >1 MiB knockout catalog frame isn't rejected (see WS_MAX_SIZE).
-        _patch_ws_max_size(pytr_api.websockets)
-        return pytr_api.TradeRepublicApi(
-            phone_no=self._phone, pin=self._pin, save_cookies=True)
+        return get_shared_api(self._phone, self._pin)
 
     def _login(self):
         if self._api is not None:
@@ -193,8 +236,9 @@ class PytrDerivatives(TRDerivativesBase):
             # is no cached session to resume, and the fresh-pairing flow needs
             # interactive 2FA we must never block on here — so we back off and
             # retry, picking up a refreshed cookie automatically once the user
-            # re-runs `pytr login`.
-            if not api.resume_websession():
+            # re-runs `pytr login`. Resumed at most once per shared session —
+            # re-resuming under an open websocket rotates tokens and 401s it.
+            if not _resume_once(api):
                 log.warning(
                     "TR session not resumable (expired or no cookie). Re-run "
                     "`pytr login -n \"<TR_PHONE>\" -p \"<TR_PIN>\" "
@@ -326,6 +370,42 @@ class PytrDerivatives(TRDerivativesBase):
             # `pytr login`.
             log.warning("TR account cash fetch failed (%s) — dropping session, "
                         "will re-login.", exc)
+            self._invalidate()
+            return None
+
+    def portfolio(self) -> list[dict] | None:
+        """Real TR portfolio via pytr's compactPortfolio subscription. Field
+        names are parsed tolerantly across pytr/TR versions; unparseable
+        entries are skipped. None (not []) on any failure."""
+        api = self._login()
+        if api is None:
+            return None
+        try:
+            import asyncio
+
+            async def _query() -> Any:
+                sub_id = await api.compact_portfolio()
+                _, _, payload = await api.recv()
+                await api.unsubscribe(sub_id)
+                return payload
+
+            payload = asyncio.get_event_loop().run_until_complete(_query())
+            raw = (payload or {}).get("positions", [])
+            out: list[dict] = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                isin = item.get("instrumentId") or item.get("isin")
+                try:
+                    size = float(item.get("netSize") or item.get("size") or 0)
+                    avg = float(item.get("averageBuyIn") or item.get("avg_price") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if isin and size > 0:
+                    out.append({"isin": str(isin), "size": size, "avg_price": avg})
+            return out
+        except Exception as exc:  # noqa: BLE001
+            log.warning("TR portfolio fetch failed (%s) — dropping session.", exc)
             self._invalidate()
             return None
 

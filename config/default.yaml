@@ -97,7 +97,7 @@ options:                   # synthetic Black-Scholes options layer (paper)
 
 learning:                  # evolutionary strategy optimizer
   enabled: true
-  population: 8
+  population: 14           # ~2 genomes per family (7 families)
   epsilon: 0.2               # exploration rate
   mutation_scale: 0.3
   evolve_every_trades: 10

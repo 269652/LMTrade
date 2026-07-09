@@ -138,6 +138,26 @@ def _build_engine_for_control(settings, control):
         broker = PaperBroker(store, starting_cash=settings.budget)
     tr = build_tr_derivatives(settings)
     engine = Engine(settings, store, broker, tr_derivatives=tr)
+    if control.mode == "live" and tr is not None:
+        # Reconcile the LIVE book against the real TR account at startup —
+        # refresh real cash, import untracked TR positions (e.g. after a db
+        # reset), delete phantom rows TR doesn't hold. The live view is then
+        # exactly real cash + real positions.
+        from .core.tr_sync import sync_tr_portfolio
+
+        live_store = store if book == "live" else Store(settings.live_db_path)
+        try:
+            s = sync_tr_portfolio(live_store, tr)
+            cash_txt = "—" if s["cash"] is None else f"{s['cash']:.2f} EUR"
+            removed = s["removed_options"] + s["removed_positions"]
+            console.print(
+                f"[cyan]TR sync:[/cyan] cash={cash_txt} | "
+                f"imported {s['imported']} | removed {removed} phantom row(s)")
+        except Exception as exc:  # noqa: BLE001 — sync must never block startup
+            console.print(f"[yellow]TR sync skipped ({exc})[/yellow]")
+        finally:
+            if live_store is not store:
+                live_store.close()
     return engine, store
 
 

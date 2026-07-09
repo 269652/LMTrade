@@ -110,15 +110,20 @@ class TestOptimizer:
         assert g2.pnl == pytest.approx(0.3)
 
     def test_evolve_replaces_worst_with_mutant_of_best(self, store):
-        opt = self._opt(store)
+        # Population 8 over 7 families -> the seed cycles back to a SECOND
+        # momentum genome at index 7. Species protection means only members
+        # of a multi-member family are replaceable, so best/worst are the
+        # two momentum genomes here.
+        opt = self._opt(store, population=8)
         genomes = opt.genomes()
+        assert genomes[0].strategy == genomes[7].strategy == "momentum"
         for _ in range(3):
-            opt.record_result(genomes[0].id, 2.0)     # best
-            opt.record_result(genomes[1].id, -2.0)    # worst
-        worst_id = genomes[1].id
+            opt.record_result(genomes[0].id, 2.0)     # best (momentum #1)
+            opt.record_result(genomes[7].id, -2.0)    # worst (momentum #2)
+        worst_id = genomes[7].id
         opt.evolve()
         after = opt.genomes()
-        assert len(after) == 6
+        assert len(after) == 8
         assert worst_id not in {g.id for g in after}
         # The mutant starts fresh.
         fresh = [g for g in after if g.trades == 0]
