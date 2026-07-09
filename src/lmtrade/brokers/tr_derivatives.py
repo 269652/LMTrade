@@ -320,7 +320,13 @@ class PytrDerivatives(TRDerivativesBase):
 
             return _parse_cash(asyncio.get_event_loop().run_until_complete(_query()))
         except Exception as exc:  # noqa: BLE001
-            log.warning("TR account cash fetch failed (%s).", exc)
+            # Drop the (stale) session so the next attempt re-resumes from the
+            # cookie file — otherwise a websocket 401 recurs every cycle
+            # against the same dead session and never picks up a refreshed
+            # `pytr login`.
+            log.warning("TR account cash fetch failed (%s) — dropping session, "
+                        "will re-login.", exc)
+            self._invalidate()
             return None
 
 

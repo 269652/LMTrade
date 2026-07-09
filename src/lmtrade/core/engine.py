@@ -561,9 +561,11 @@ class Engine:
         cash = self.broker.cash()
         total_value = self._positions_value(prices) + self._options_value(prices)
         self._persist_option_marks(prices)
-        if self.tr_derivatives is not None:
-            # Live TR account cash for the dashboard (None-safe: no-op without
-            # a real authenticated TR client).
+        # Live TR account cash for the dashboard, refreshed at most every few
+        # minutes rather than every cycle — each fetch opens a websocket, so
+        # doing it per-cycle hammers TR (and multiplies any 401). None-safe:
+        # no-op without a real authenticated TR client.
+        if self.tr_derivatives is not None and self.scheduler.due("tr_cash", 300):
             tr_cash = self.tr_derivatives.account_cash()
             if tr_cash is not None:
                 self.store.set_meta("tr_account_cash", tr_cash)

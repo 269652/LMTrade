@@ -39,7 +39,9 @@ def setup_logging(level: int = logging.INFO) -> None:
     # Set explicitly rather than relying on root inheritance: basicConfig()
     # is a no-op once root already has a handler (e.g. under a test runner's
     # log-capture plugin, or if another library configured logging first).
-    for noisy in ("httpx", "httpcore"):
+    # pytr logs "Connecting to websocket..."/"Connected." at INFO on every
+    # connection — noise once it's working; keep only its warnings/errors.
+    for noisy in ("httpx", "httpcore", "pytr", "pytr.api"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     _CONFIGURED = True
 
