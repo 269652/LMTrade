@@ -386,41 +386,79 @@ class PytrDerivatives(TRDerivativesBase):
             self._invalidate()
             return None
 
+    # TR has served the holdings list under different subscription topics
+    # across backend/pytr versions. Some live accounts reject
+    # "compactPortfolio" with BAD_SUBSCRIPTION_TYPE ("Unknown topic type:
+    # compactPortfolio") while accepting the older "portfolio" topic. Try each
+    # in order — a rejected TOPIC is not a dead SESSION.
+    _PORTFOLIO_METHODS = ("compact_portfolio", "portfolio")
+
+    @staticmethod
+    def _is_unknown_topic(exc: Exception) -> bool:
+        """True when TR rejected the SUBSCRIPTION TYPE (wrong topic name),
+        which is recoverable by trying another topic — as opposed to a session
+        failure (401/websocket drop) that must invalidate the session. pytr's
+        TradeRepublicError carries the error payload on `.error` and also in
+        its args, so check both."""
+        blob = f"{getattr(exc, 'error', '')} {exc}"
+        return "BAD_SUBSCRIPTION_TYPE" in blob or "Unknown topic type" in blob
+
+    @staticmethod
+    def _parse_portfolio(payload: Any) -> list[dict]:
+        raw = (payload or {}).get("positions", [])
+        out: list[dict] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            isin = item.get("instrumentId") or item.get("isin")
+            try:
+                size = float(item.get("netSize") or item.get("size")
+                             or item.get("amount") or 0)
+                avg = float(item.get("averageBuyIn") or item.get("avg_price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if isin and size > 0:
+                out.append({"isin": str(isin), "size": size, "avg_price": avg})
+        return out
+
     def portfolio(self) -> list[dict] | None:
-        """Real TR portfolio via pytr's compactPortfolio subscription. Field
-        names are parsed tolerantly across pytr/TR versions; unparseable
-        entries are skipped. None (not []) on any failure."""
+        """Real TR portfolio. Tries each known holdings subscription topic
+        until one is accepted; field names are parsed tolerantly across
+        pytr/TR versions and unparseable entries are skipped. None (not []) on
+        any failure, so callers never reconcile against phantom-empty data."""
         api = self._login()
         if api is None:
             return None
-        try:
-            import asyncio
+        import asyncio
 
-            async def _query() -> Any:
-                sub_id = await api.compact_portfolio()
-                payload = await _recv_for(api, sub_id)
-                await api.unsubscribe(sub_id)
-                return payload
+        loop = asyncio.get_event_loop()
+        last_topic_error: Exception | None = None
+        for method_name in self._PORTFOLIO_METHODS:
+            method = getattr(api, method_name, None)
+            if method is None:
+                continue
+            try:
+                async def _query(_m: Any = method) -> Any:
+                    sub_id = await _m()
+                    payload = await _recv_for(api, sub_id)
+                    await api.unsubscribe(sub_id)
+                    return payload
 
-            payload = asyncio.get_event_loop().run_until_complete(_query())
-            raw = (payload or {}).get("positions", [])
-            out: list[dict] = []
-            for item in raw:
-                if not isinstance(item, dict):
+                payload = loop.run_until_complete(_query())
+            except Exception as exc:  # noqa: BLE001
+                if self._is_unknown_topic(exc):
+                    # Wrong topic for this backend — keep the session, try next.
+                    last_topic_error = exc
+                    log.info("TR portfolio topic %r not supported — trying next.",
+                             method_name)
                     continue
-                isin = item.get("instrumentId") or item.get("isin")
-                try:
-                    size = float(item.get("netSize") or item.get("size") or 0)
-                    avg = float(item.get("averageBuyIn") or item.get("avg_price") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if isin and size > 0:
-                    out.append({"isin": str(isin), "size": size, "avg_price": avg})
-            return out
-        except Exception as exc:  # noqa: BLE001
-            log.warning("TR portfolio fetch failed (%s) — dropping session.", exc)
-            self._invalidate()
-            return None
+                log.warning("TR portfolio fetch failed (%s) — dropping session.", exc)
+                self._invalidate()
+                return None
+            return self._parse_portfolio(payload)
+        log.warning("TR portfolio: no supported holdings topic (last error: %r).",
+                    last_topic_error)
+        return None
 
 
 def build_tr_derivatives(settings: Settings) -> TRDerivativesBase | None:

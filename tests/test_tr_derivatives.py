@@ -379,6 +379,126 @@ class TestPytrSearchDiagnostics:
         assert "AAPL" in blob
 
 
+class FakeTRError(ValueError):
+    """Mirrors pytr.api.TradeRepublicError: a rejected subscription surfaces as
+    an exception carrying the error payload on `.error` (it has no message
+    args, so str(exc) is empty — the code must inspect `.error`)."""
+
+    def __init__(self, sub_id, subscription, error):
+        self.subscription_id = sub_id
+        self.subscription = subscription
+        self.error = error
+
+
+class FakePortfolioApi:
+    """Fake pytr session whose holdings topic support is configurable, to
+    model the live incident where TR rejected `compactPortfolio` with
+    BAD_SUBSCRIPTION_TYPE but accepted the older `portfolio` topic."""
+
+    def __init__(self, supported=("compactPortfolio",), positions=None,
+                 resume_ok=True, recv_error=None):
+        self.supported = set(supported)
+        self.positions = positions if positions is not None else []
+        self.resume_ok = resume_ok
+        self._recv_error = recv_error         # a non-topic error (e.g. 401)
+        self.calls: list = []
+        self._last_topic = None
+
+    def resume_websession(self):
+        return self.resume_ok
+
+    async def compact_portfolio(self):
+        self.calls.append("compact_portfolio")
+        self._last_topic = "compactPortfolio"
+        return "sub-cp"
+
+    async def portfolio(self):
+        self.calls.append("portfolio")
+        self._last_topic = "portfolio"
+        return "sub-pf"
+
+    async def recv(self):
+        if self._recv_error is not None:
+            raise self._recv_error
+        topic = self._last_topic
+        sub_id = "sub-cp" if topic == "compactPortfolio" else "sub-pf"
+        if topic not in self.supported:
+            raise FakeTRError(
+                sub_id, {"type": topic},
+                {"errors": [{"errorCode": "BAD_SUBSCRIPTION_TYPE",
+                             "errorMessage": f"Unknown topic type: {topic}"}]})
+        return (sub_id, {}, {"positions": self.positions})
+
+    async def unsubscribe(self, sub_id):
+        self.calls.append(("unsubscribe", sub_id))
+
+
+class TestPytrPortfolio:
+    """portfolio() reconciles the live book against the real TR account. The
+    holdings list has moved between subscription topics across TR/pytr
+    versions: some accounts reject `compactPortfolio` (BAD_SUBSCRIPTION_TYPE)
+    but accept the older `portfolio` topic. A rejected TOPIC is not a dead
+    SESSION, so the client tries the next candidate rather than tearing the
+    session down."""
+
+    POSITIONS = [{"instrumentId": "DE000KO1", "netSize": "5", "averageBuyIn": "2.5"}]
+
+    def test_parses_positions_from_compact_topic(self):
+        api = FakePortfolioApi(supported=("compactPortfolio",), positions=self.POSITIONS)
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        out = client.portfolio()
+        assert out == [{"isin": "DE000KO1", "size": 5.0, "avg_price": 2.5}]
+
+    def test_falls_back_to_portfolio_topic_when_compact_rejected(self):
+        # compactPortfolio unknown to this backend; portfolio accepted.
+        api = FakePortfolioApi(supported=("portfolio",), positions=self.POSITIONS)
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        out = client.portfolio()
+        assert out == [{"isin": "DE000KO1", "size": 5.0, "avg_price": 2.5}]
+        # Both topics were attempted, in order.
+        assert "compact_portfolio" in api.calls and "portfolio" in api.calls
+
+    def test_rejected_topic_does_not_drop_session(self):
+        api = FakePortfolioApi(supported=("portfolio",), positions=self.POSITIONS)
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        client.portfolio()
+        assert client._api is api             # session preserved, not invalidated
+
+    def test_parses_alternate_field_names(self):
+        api = FakePortfolioApi(
+            supported=("portfolio",),
+            positions=[{"isin": "DE000X", "amount": "3", "avg_price": "9.0"}])
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        assert client.portfolio() == [{"isin": "DE000X", "size": 3.0, "avg_price": 9.0}]
+
+    def test_none_when_all_topics_rejected(self):
+        api = FakePortfolioApi(supported=())     # neither topic accepted
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        assert client.portfolio() is None
+
+    def test_real_session_error_returns_none_and_drops_session(self):
+        boom = RuntimeError("server rejected WebSocket connection: HTTP 401")
+        api = FakePortfolioApi(recv_error=boom)
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        assert client.portfolio() is None
+        assert client._api is None            # a real session failure DOES drop it
+
+    def test_none_when_unavailable(self):
+        api = FakePortfolioApi(resume_ok=False)
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        assert client.portfolio() is None
+
+    def test_skips_unparseable_entries(self):
+        api = FakePortfolioApi(supported=("compactPortfolio",), positions=[
+            {"instrumentId": "DE000A", "netSize": "bad", "averageBuyIn": "1"},  # bad size
+            {"netSize": "2", "averageBuyIn": "1"},                              # no isin
+            {"instrumentId": "DE000B", "netSize": "0", "averageBuyIn": "1"},    # zero size
+            {"instrumentId": "DE000C", "netSize": "4", "averageBuyIn": "3"},    # good
+        ])
+        client = PytrDerivatives("+49", "1", api_factory=lambda: api)
+        assert client.portfolio() == [{"isin": "DE000C", "size": 4.0, "avg_price": 3.0}]
+
+
 class TestFakeClient:
     def test_search_returns_ko_quotes_sorted_by_leverage_fit(self):
         fake = FakeTRDerivatives(catalog={
