@@ -76,6 +76,8 @@ class StrategyOptimizer:
         self.rng = rng or random.Random()
         if store.get_meta(GENOMES_KEY) is None:
             self._save(self._seed_population())
+        else:
+            self._ensure_families()
 
     # -- persistence ------------------------------------------------------------
     def genomes(self) -> list[Genome]:
@@ -96,6 +98,38 @@ class StrategyOptimizer:
                 params = self._mutate_params(name, params)
             out.append(Genome(id=uuid.uuid4().hex[:8], strategy=name, params=params))
         return out
+
+    def _ensure_families(self) -> None:
+        """Inject any strategy family registered AFTER this population was
+        persisted (e.g. a code update adding a new strategy). Without this, a
+        long-running bot's population would never contain the new family —
+        evolve() only clones existing strategies. Each missing family replaces
+        the worst genome of a family with multiple members (species
+        protection), so no existing family is extincted."""
+        genomes = self.genomes()
+        present = {g.strategy for g in genomes}
+        missing = [name for name in STRATEGIES if name not in present]
+        if not missing:
+            return
+        changed = False
+        for name in missing:
+            fresh = Genome(id=uuid.uuid4().hex[:8], strategy=name,
+                           params=dict(STRATEGIES[name].default_params))
+            if len(genomes) < self.population:
+                genomes.append(fresh)
+                changed = True
+                continue
+            counts: dict[str, int] = {}
+            for g in genomes:
+                counts[g.strategy] = counts.get(g.strategy, 0) + 1
+            crowded = [g for g in genomes if counts[g.strategy] >= 2]
+            if not crowded:
+                continue   # nothing replaceable without extincting a family
+            worst = min(crowded, key=lambda g: g.fitness)
+            genomes = [g for g in genomes if g.id != worst.id] + [fresh]
+            changed = True
+        if changed:
+            self._save(genomes)
 
     def _mutate_params(self, strategy: str, params: dict) -> dict:
         spec = STRATEGIES[strategy]

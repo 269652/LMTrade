@@ -76,6 +76,37 @@ def breakout(history: list[float], p: dict) -> tuple[str, float]:
     return "hold", 0.0
 
 
+def tsmom(history: list[float], p: dict) -> tuple[str, float]:
+    """Vol-scaled time-series momentum (Moskowitz-Ooi-Pedersen 2012; vol
+    management per Barroso & Santa-Clara 2015). Direction is the sign of the
+    k-bar return; conviction is that return's t-statistic — drift divided by
+    noise*sqrt(k) — so a grinding low-vol trend scores higher than the same
+    move in a churning market. Entry requires |t| > t_entry."""
+    k = int(p.get("lookback", 20))
+    vol_window = int(p.get("vol_window", 20))
+    t_entry = float(p.get("t_entry", 1.0))
+    need = max(k + 1, vol_window + 1)
+    if len(history) < need or history[-k - 1] <= 0:
+        return "hold", 0.0
+    ret = (history[-1] - history[-k - 1]) / history[-k - 1]
+    tail = history[-(vol_window + 1):]
+    rets = [(tail[i] - tail[i - 1]) / tail[i - 1]
+            for i in range(1, len(tail)) if tail[i - 1] > 0]
+    if len(rets) < 2:
+        return "hold", 0.0
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    vol = var ** 0.5
+    if vol <= 1e-12:
+        return "hold", 0.0
+    t_stat = ret / (vol * (k ** 0.5))
+    if t_stat > t_entry:
+        return "buy", _clip01((t_stat - t_entry) / (2 * t_entry))
+    if t_stat < -t_entry:
+        return "sell", _clip01((-t_stat - t_entry) / (2 * t_entry))
+    return "hold", 0.0
+
+
 STRATEGIES: dict[str, StrategySpec] = {
     "momentum": StrategySpec(
         "momentum", momentum,
@@ -91,6 +122,12 @@ STRATEGIES: dict[str, StrategySpec] = {
         "breakout", breakout,
         default_params={"lookback": 30},
         bounds={"lookback": (10, 60)},
+    ),
+    "tsmom": StrategySpec(
+        "tsmom", tsmom,
+        default_params={"lookback": 20, "vol_window": 20, "t_entry": 1.0},
+        bounds={"lookback": (10, 60), "vol_window": (10, 40),
+                "t_entry": (0.5, 2.5)},
     ),
 }
 
