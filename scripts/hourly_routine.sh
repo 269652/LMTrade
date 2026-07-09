@@ -13,7 +13,13 @@ cd "$REPO_ROOT"
 
 STATE_BRANCH="bot-state"
 STATE_FILE="state/lmtrade.db"
-CYCLES="${LMTRADE_HOURLY_CYCLES:-20}"
+# 12 cycles x ~30-symbol universe (concurrent, bounded fetch) keeps total
+# Yahoo request volume reasonable per hour — the universe grew 6x (5 -> 30
+# symbols) since this default was first set to 20; sustained high request
+# volume is what triggered rate-limiting in the incident that led to the
+# data-source-safety fix (a rate-limited symbol degrades safely now, but
+# there's no reason to court it more than necessary).
+CYCLES="${LMTRADE_HOURLY_CYCLES:-12}"
 INTERVAL="${LMTRADE_HOURLY_INTERVAL:-60}"
 
 echo "==> Fetching $STATE_BRANCH..."

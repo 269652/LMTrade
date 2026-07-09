@@ -7,21 +7,61 @@ budget: 100.0              # starting cash, account currency (paper default;
                            # ~1 EUR flat fees are a 10% drag at 10 EUR scale)
 currency: EUR
 
-universe:                  # instruments to trade. Mixes US equities (live
-                           # only during NYSE hours + extended hours) with
-                           # crypto (trades 24/7) so the feed never fully
-                           # goes stale overnight or outside market hours.
+universe:                  # A diversified, TR-realistic universe: US mega-caps,
+                           # EU blue chips across several exchanges, broad
+                           # ETFs, and crypto (24/7, keeps the feed live when
+                           # every equity market is closed). This is NOT
+                           # literally "everything on Trade Republic" — TR has
+                           # no public catalog API, and most of its actual
+                           # instrument count is leveraged warrants/knock-out
+                           # certificates from partner banks that exist only
+                           # inside TR's own app, with no accessible market
+                           # data feed at all. What's listed here is what's
+                           # both genuinely tradeable on TR AND has live data
+                           # we can actually fetch (Yahoo Finance).
+  # US equities
   - AAPL
   - MSFT
+  - GOOGL
+  - AMZN
+  - NVDA
+  - META
+  - TSLA
+  - JPM
+  - V
+  - JNJ
+  # EU equities (Yahoo exchange suffixes: .DE Xetra, .PA Paris, .AS Amsterdam,
+  # .SW Switzerland)
+  - SAP.DE
+  - SIE.DE
+  - ALV.DE
+  - DTE.DE
+  - ASML.AS
+  - MC.PA
+  - OR.PA
+  - AIR.PA
+  - NESN.SW
+  - NOVN.SW
+  # ETFs
   - SPY
+  - QQQ
+  - IWM
+  - GLD
+  - EFA
+  # Crypto (24/7)
   - BTC-USD
   - ETH-USD
+  - SOL-USD
+  - XRP-USD
+  - ADA-USD
 
 loop:
   interval_seconds: 15     # high-cadence intraday loop (TR can't do true HFT;
                            # sub-second execution is impossible via its API)
-  max_positions: 5         # cap concurrent open positions (one per universe
-                           # symbol at most — each symbol only ever holds one)
+  max_positions: 8         # cap concurrent open positions — deliberately far
+                           # below universe size; slots go to the strongest
+                           # ranked signals across the whole universe each
+                           # cycle, not first-come-first-served by list order
 
 model:
   stack: [heuristic, slm, perplexity]   # providers consulted, in order
@@ -46,7 +86,9 @@ risk:
 options:                   # synthetic Black-Scholes options layer (paper)
   enabled: true
   expiry_days: 7
-  max_option_fraction: 0.3   # max fraction of equity in one premium
+  max_option_fraction: 0.15  # max fraction of equity in one premium — lower
+                             # than a small-universe default since up to
+                             # max_positions can now fill concurrently
   take_profit_pct: 0.5       # +50% premium -> take profit
   stop_loss_pct: 0.4         # -40% premium -> cut
   min_hours_to_expiry: 24    # force-close inside this window

@@ -291,13 +291,19 @@ class Engine:
 
         symbols = list(dict.fromkeys(
             self.settings.universe + [self.settings.benchmark.symbol]))
-        quotes: dict[str, Quote] = {}
+        # Concurrent, bounded fetch — a large universe fetched sequentially
+        # would make cycle time grow linearly with universe size. The cap
+        # also keeps request bursts against Yahoo modest (see
+        # data/market.py: this is what previously triggered rate limiting).
+        if hasattr(self.market, "quotes_concurrent"):
+            quotes: dict[str, Quote] = self.market.quotes_concurrent(
+                symbols, max_workers=min(8, len(symbols)))
+        else:
+            quotes = {s: self.market.quote(s) for s in symbols}
         prices: dict[str, float] = {}     # valuation prices: fresh, or last-known-good
         tradeable: set[str] = set()        # symbols with a FRESH trustworthy quote
         degraded: list[str] = []
-        for symbol in symbols:
-            q = self.market.quote(symbol)
-            quotes[symbol] = q
+        for symbol, q in quotes.items():
             if self._is_trustworthy(q):
                 prices[symbol] = q.price
                 self._last_good_price[symbol] = q.price
@@ -358,8 +364,10 @@ class Engine:
                 source="economics")
         else:
             open_count = len(self.store.open_options()) + len(self.store.positions())
+            slots = self.settings.loop.max_positions - open_count
+            candidates: list[tuple[Decision, str | None]] = []
             for symbol in self.settings.universe:
-                if open_count >= self.settings.loop.max_positions:
+                if slots <= 0:
                     break
                 if symbol not in tradeable:
                     continue
@@ -376,11 +384,18 @@ class Engine:
                 if decision.direction == "hold" or \
                         decision.confidence < self.settings.risk.min_confidence:
                     continue
+                candidates.append((decision, genome_id))
+
+            # Rank by confidence so limited slots go to the strongest signals
+            # across the whole universe, not just whichever symbols happened
+            # to come first in the list.
+            candidates.sort(key=lambda c: c[0].confidence, reverse=True)
+            for decision, genome_id in candidates[:max(0, slots)]:
+                quote = quotes[decision.symbol]
                 if self.settings.options.enabled:
-                    self._enter_option(quotes[symbol], decision, genome_id)
+                    self._enter_option(quote, decision, genome_id)
                 else:
-                    self._enter_equity(quotes[symbol], decision, econ)
-                open_count += 1
+                    self._enter_equity(quote, decision, econ)
 
         cash = self.broker.cash()
         equity = cash + self._positions_value(prices) + self._options_value(prices)

@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
 
@@ -81,6 +82,18 @@ class MarketData:
             except Exception:
                 pass  # fall through to synthetic on any data hiccup
         return self._synthetic_quote(symbol)
+
+    def quotes_concurrent(self, symbols: list[str], max_workers: int = 6) -> dict[str, Quote]:
+        """Fetch multiple symbols in parallel, bounded by max_workers so a
+        larger universe doesn't burst-hammer Yahoo (the direct cause of the
+        rate-limiting that triggered the synthetic-fallback data-integrity
+        bug — see test_data_source_safety.py). A failing symbol falls back to
+        synthetic individually without affecting the others, same as quote()."""
+        if not symbols:
+            return {}
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+            results = list(pool.map(self.quote, symbols))
+        return dict(zip(symbols, results))
 
     # -- live data (Yahoo, via httpx) ------------------------------------------
     def _yahoo_quote(self, symbol: str) -> Quote:
