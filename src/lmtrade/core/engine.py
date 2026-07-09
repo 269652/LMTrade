@@ -53,10 +53,12 @@ class Engine:
         news_fetcher=None, analysis_caller=None, market=None,
         tr_derivatives="auto",
         now: Callable[[], float] = time.time,
+        fallback_store: Store | None = None,
     ):
         self.settings = settings
         self.store = store
         self.broker = broker
+        self.fallback_store = fallback_store  # paper store for fallback analysis in live mode
         self.now = now
         self.bus = EventBus(store)
         self.market = market or MarketData(settings.data.provider,
@@ -180,6 +182,14 @@ class Engine:
         red_opts = [o for o in open_opts if pnl_map[o["id"]] < 0]
         # max = highest (least negative) pnl = smallest absolute loss
         return max(red_opts, key=lambda o: pnl_map[o["id"]])
+
+    def _get_analysis_with_fallback(self) -> dict | None:
+        """Get daily market analysis from store, falling back to paper store if live analysis
+        is missing (useful when live mode doesn't have analysis but paper run does)."""
+        analysis = self.store.get_meta("market_analysis")
+        if analysis is None and self.fallback_store is not None:
+            analysis = self.fallback_store.get_meta("market_analysis")
+        return analysis
 
     # ------------------------------------------------------------ research jobs
     def _run_scheduled_jobs(self) -> None:
@@ -428,8 +438,9 @@ class Engine:
                                     0.6, f"news sentiment {sent}", 0.0))
         # Daily market analysis (compiled by the Claude Routine, imported via
         # `lmtrade import-analysis`) — a directional bias per symbol, valid for
-        # the window it declares.
-        analysis = self.store.get_meta("market_analysis")
+        # the window it declares. Falls back to paper store if live analysis
+        # is missing (e.g. Claude reached limits but paper run succeeded).
+        analysis = self._get_analysis_with_fallback()
         if analysis:
             age = self.now() - float(analysis.get("ts", 0))
             valid_s = float(analysis.get("valid_hours", 24)) * 3600

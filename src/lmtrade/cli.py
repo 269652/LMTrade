@@ -127,17 +127,34 @@ def _build_engine_for_control(settings, control):
     from .brokers.paper import PaperBroker
     from .brokers.tr_derivatives import build_tr_derivatives
 
-    book = "live" if control.live_armed else "paper"
-    store = Store(settings.book_db_path(book))
+    fallback_store = None
     if control.live_armed:
         from .brokers.trade_republic import TradeRepublicBroker
-        broker = TradeRepublicBroker(store, settings, armed=True)
-        console.print("[bold red]⚠ LIVE + ARMED — real Trade Republic orders "
-                      "will be placed. Against TR ToS.[/bold red]")
+        try:
+            # Try to set up live broker; if TR credentials are missing/invalid,
+            # fall back to paper to prevent engine crash
+            book = "live"
+            store = Store(settings.book_db_path(book))
+            broker = TradeRepublicBroker(store, settings, armed=True)
+            console.print("[bold red]⚠ LIVE + ARMED — real Trade Republic orders "
+                          "will be placed. Against TR ToS.[/bold red]")
+            # Also open paper store as fallback for analysis (in case Claude
+            # reached limits but paper run succeeded)
+            fallback_store = Store(settings.book_db_path("paper"))
+        except RuntimeError as e:
+            # TR credentials missing or invalid; fall back to paper
+            store.close()
+            book = "paper"
+            store = Store(settings.book_db_path(book))
+            broker = PaperBroker(store, starting_cash=settings.budget)
+            console.print(f"[bold red]⚠ LIVE mode requested but TR setup failed: {e}[/bold red]")
+            console.print("[yellow]Falling back to paper trading.[/yellow]")
     else:
+        book = "paper"
+        store = Store(settings.book_db_path(book))
         broker = PaperBroker(store, starting_cash=settings.budget)
     tr = build_tr_derivatives(settings)
-    engine = Engine(settings, store, broker, tr_derivatives=tr)
+    engine = Engine(settings, store, broker, tr_derivatives=tr, fallback_store=fallback_store)
     if control.mode == "live" and tr is not None:
         # Reconcile the LIVE book against the real TR account at startup —
         # refresh real cash, import untracked TR positions (e.g. after a db
@@ -181,6 +198,8 @@ def _run_with_control(settings, max_cycles):
             )
         finally:
             store.close()
+            if engine.fallback_store is not None:
+                engine.fallback_store.close()
         # If control is unchanged, run_forever returned because it finished
         # (max_cycles) or was stopped — don't loop forever rebuilding.
         if (ControlState.load(settings.control_path).mode,
