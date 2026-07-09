@@ -264,9 +264,16 @@ class TestControlPlane:
         assert cclient.get("/api/control").json()["mode"] == "paper"
 
     def test_switch_mode_changes_the_book_view(self, cclient):
+        # Paper mode: the paper book.
         assert cclient.get("/api/summary").json()["starting_cash"] == 100.0
+        # Unarmed live: the engine still simulates on the paper book, so the
+        # view deliberately stays on paper (an empty live book would show a
+        # blank dashboard); real TR balances are overlaid separately.
         cclient.post("/api/control/mode", json={"mode": "live"})
-        # Now the view serves the LIVE book.
+        assert cclient.get("/api/summary").json()["starting_cash"] == 100.0
+        # ARMING live (net worth 500 > threshold) switches the view to the
+        # live book, which the armed engine trades for real.
+        cclient.post("/api/control/arm", json={"confirm": True})
         assert cclient.get("/api/summary").json()["starting_cash"] == 999.0
 
     def test_invalid_mode_rejected(self, cclient):

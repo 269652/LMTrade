@@ -387,29 +387,49 @@ class PytrDerivatives(TRDerivativesBase):
             return None
 
     # TR has served the holdings list under different subscription topics
-    # across backend/pytr versions. Some live accounts reject
-    # "compactPortfolio" with BAD_SUBSCRIPTION_TYPE ("Unknown topic type:
-    # compactPortfolio") while accepting the older "portfolio" topic. Try each
-    # in order — a rejected TOPIC is not a dead SESSION.
-    _PORTFOLIO_METHODS = ("compact_portfolio", "portfolio")
+    # across backend/account versions. Newer accounts REMOVED the classic
+    # "compactPortfolio" and "portfolio" topics (both rejected live with
+    # BAD_SUBSCRIPTION_TYPE "Unknown topic type: compactPortfolio") and now
+    # deliver holdings via "compactPortfolioByType". We subscribe by raw topic
+    # (not pytr's named methods) so topics pytr has no wrapper for are still
+    # reachable, and try each in order — a rejected TOPIC is not a dead
+    # SESSION.
+    _PORTFOLIO_TOPICS = (
+        "compactPortfolio",         # classic; still present on older accounts
+        "compactPortfolioByType",   # current TR app; newer accounts only accept this
+        "portfolio",                # legacy
+        "portfolioStatus",          # last-resort fallback
+    )
 
     @staticmethod
     def _is_unknown_topic(exc: Exception) -> bool:
-        """True when TR rejected the SUBSCRIPTION TYPE (wrong topic name),
-        which is recoverable by trying another topic — as opposed to a session
-        failure (401/websocket drop) that must invalidate the session. pytr's
-        TradeRepublicError carries the error payload on `.error` and also in
-        its args, so check both."""
+        """True when TR rejected the SUBSCRIPTION TYPE (wrong/removed topic
+        name), which is recoverable by trying another topic — as opposed to a
+        session failure (401/websocket drop) that must invalidate the session.
+        pytr's TradeRepublicError carries the error payload on `.error` and
+        also in its args, so check both."""
         blob = f"{getattr(exc, 'error', '')} {exc}"
         return "BAD_SUBSCRIPTION_TYPE" in blob or "Unknown topic type" in blob
 
     @staticmethod
-    def _parse_portfolio(payload: Any) -> list[dict]:
-        raw = (payload or {}).get("positions", [])
+    def _iter_positions(payload: Any) -> "list[dict]":
+        """Flatten a holdings payload to a list of position dicts. Flat topics
+        put them under "positions"; compactPortfolioByType groups them under
+        "categories":[{"positions":[...]}]. Handle both."""
+        items: list[dict] = []
+        if not isinstance(payload, dict):
+            return items
+        if isinstance(payload.get("positions"), list):
+            items.extend(p for p in payload["positions"] if isinstance(p, dict))
+        for cat in payload.get("categories", []) or []:
+            if isinstance(cat, dict) and isinstance(cat.get("positions"), list):
+                items.extend(p for p in cat["positions"] if isinstance(p, dict))
+        return items
+
+    @classmethod
+    def _parse_portfolio(cls, payload: Any) -> list[dict]:
         out: list[dict] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
+        for item in cls._iter_positions(payload):
             isin = item.get("instrumentId") or item.get("isin")
             try:
                 size = float(item.get("netSize") or item.get("size")
@@ -424,7 +444,7 @@ class PytrDerivatives(TRDerivativesBase):
     def portfolio(self) -> list[dict] | None:
         """Real TR portfolio. Tries each known holdings subscription topic
         until one is accepted; field names are parsed tolerantly across
-        pytr/TR versions and unparseable entries are skipped. None (not []) on
+        account versions and unparseable entries are skipped. None (not []) on
         any failure, so callers never reconcile against phantom-empty data."""
         api = self._login()
         if api is None:
@@ -433,13 +453,10 @@ class PytrDerivatives(TRDerivativesBase):
 
         loop = asyncio.get_event_loop()
         last_topic_error: Exception | None = None
-        for method_name in self._PORTFOLIO_METHODS:
-            method = getattr(api, method_name, None)
-            if method is None:
-                continue
+        for topic in self._PORTFOLIO_TOPICS:
             try:
-                async def _query(_m: Any = method) -> Any:
-                    sub_id = await _m()
+                async def _query(_t: str = topic) -> Any:
+                    sub_id = await api.subscribe({"type": _t})
                     payload = await _recv_for(api, sub_id)
                     await api.unsubscribe(sub_id)
                     return payload
@@ -447,17 +464,20 @@ class PytrDerivatives(TRDerivativesBase):
                 payload = loop.run_until_complete(_query())
             except Exception as exc:  # noqa: BLE001
                 if self._is_unknown_topic(exc):
-                    # Wrong topic for this backend — keep the session, try next.
+                    # Wrong/removed topic for this backend — keep the session,
+                    # try the next candidate.
                     last_topic_error = exc
                     log.info("TR portfolio topic %r not supported — trying next.",
-                             method_name)
+                             topic)
                     continue
                 log.warning("TR portfolio fetch failed (%s) — dropping session.", exc)
                 self._invalidate()
                 return None
             return self._parse_portfolio(payload)
-        log.warning("TR portfolio: no supported holdings topic (last error: %r).",
-                    last_topic_error)
+        log.warning("TR portfolio: no supported holdings topic (tried %s; last "
+                    "error: %r). Position reconciliation skipped — the bot "
+                    "continues, but TR positions won't auto-import.",
+                    ", ".join(self._PORTFOLIO_TOPICS), last_topic_error)
         return None
 
 

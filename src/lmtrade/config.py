@@ -97,14 +97,6 @@ class LoopConfig(BaseModel):
     # hourly cycle count. 0 = no extra cap (fill up to remaining slots, the
     # historical behavior).
     max_new_positions_per_cycle: int = 0
-    # Experimental hotswap: when the book is full and a high-confidence signal
-    # arrives, close the open position with the smallest current loss (the
-    # "cheapest exit") to free a slot, then open the new position.
-    # Only fires when the majority of open positions are in the red AND the
-    # incoming signal meets the stricter hotswap_min_confidence threshold.
-    hotswap_enabled: bool = True
-    hotswap_min_confidence: float = 0.80    # stricter than normal min_confidence
-    hotswap_red_majority_pct: float = 0.60  # fraction of book that must be losing
     # Stale eviction: close positions that have been sideways for too long to
     # free a slot for a stronger incoming signal.  A position is "stale" when
     # it has been held for at least stale_hours AND its unrealised P&L is still

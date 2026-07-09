@@ -151,6 +151,51 @@ class TestScheduledResearch:
         assert settings.risk.min_confidence == pytest.approx(0.7)
         assert any(a["kind"] == "insight" for a in store.recent_activity(20))
 
+    def test_fresh_analysis_in_db_is_not_rebuilt(self, settings, store):
+        # A valid, non-expired analysis already in the DB must be reused, not
+        # recompiled on (re)start — the expensive web-search call is skipped.
+        store.set_meta("market_analysis", {
+            "valid_hours": settings.research.daily_analysis_interval_hours,
+            "ts": 1_000_000.0,
+            "symbols": {"AAPL": {"bias": "bullish", "confidence": 0.6, "notes": "x"}},
+        })
+        prompts: list[str] = []
+
+        def caller(p):
+            prompts.append(p)
+            return json.dumps({"symbols": {"AAPL": {"bias": "bearish",
+                                                    "confidence": 0.9}}}), 0.0
+
+        # Clock just after the analysis timestamp -> still well within validity.
+        engine = make_engine(settings, store, analysis_caller=caller,
+                             now=lambda: 1_000_100.0)
+        engine.run_cycle()
+        assert not any("directional bias" in p for p in prompts)  # no recompile
+        a = store.get_meta("market_analysis")
+        assert a["ts"] == 1_000_000.0                             # untouched
+        assert a["symbols"]["AAPL"]["bias"] == "bullish"
+
+    def test_stale_analysis_in_db_is_rebuilt(self, settings, store):
+        store.set_meta("market_analysis", {
+            "valid_hours": settings.research.daily_analysis_interval_hours,
+            "ts": 1_000_000.0,
+            "symbols": {"AAPL": {"bias": "bullish", "confidence": 0.6}},
+        })
+        prompts: list[str] = []
+
+        def caller(p):
+            prompts.append(p)
+            return json.dumps({"symbols": {"AAPL": {"bias": "bearish",
+                                                    "confidence": 0.9}}}), 0.0
+
+        # Clock past the validity window -> stale, must recompile.
+        stale = 1_000_000.0 + settings.research.daily_analysis_interval_hours * 3600 + 10
+        engine = make_engine(settings, store, analysis_caller=caller,
+                             now=lambda: stale)
+        engine.run_cycle()
+        assert any("directional bias" in p for p in prompts)      # recompiled
+        assert store.get_meta("market_analysis")["symbols"]["AAPL"]["bias"] == "bearish"
+
 
 class TestEquityValuation:
     def test_equity_includes_option_marks(self, settings, store):
@@ -241,126 +286,6 @@ class TestBookFullVisibility:
         engine.run_cycle()
         logs = " ".join(l["message"] for l in store.recent_logs(50)).lower()
         assert "no free slot" not in logs
-
-
-class TestHotswap:
-    """Experimental hotswap: when the book is full and the majority of open
-    positions are in the red, the engine closes the position with the smallest
-    absolute loss to free one slot, then lets normal signal logic decide the
-    replacement entry.  The evicted position is always the 'least bad' loser
-    to minimise realised damage."""
-
-    _SHORT_EXPIRY = time.time() + 7 * 86_400   # 7 days: deep-OTM mark ≈ 0
-
-    def _loser(self, store, symbol, contracts=1.0, entry=1.0):
-        """Deep-OTM short-expiry call: Black-Scholes mark ≈ 0 → red.
-        sl=0.0 prevents _manage_options from exiting via stop-loss."""
-        return store.open_option(
-            symbol, "call", strike=1_000_000.0,
-            expiry_ts=self._SHORT_EXPIRY,
-            iv=0.2, contracts=contracts, entry_premium=entry,
-            genome_id=None, tp_premium=1e9, sl_premium=0.0,
-        )
-
-    def _winner(self, store, symbol, contracts=1.0, entry=0.01):
-        """Deep-ITM short-expiry call: mark ≈ spot ≈ 1 >> entry → green.
-        tp=1e9 / sl=0 prevent _manage_options exits."""
-        return store.open_option(
-            symbol, "call", strike=0.001,
-            expiry_ts=self._SHORT_EXPIRY,
-            iv=0.2, contracts=contracts, entry_premium=entry,
-            genome_id=None, tp_premium=1e9, sl_premium=0.0,
-        )
-
-    def test_hotswap_fires_when_book_full_and_majority_red(self, settings, store):
-        """Full book of losers → engine hotswaps one out and records it."""
-        # Two deep-OTM AAPL calls fill both slots; AAPL is in the universe so
-        # _persist_option_marks will compute their near-zero marks this cycle.
-        settings.loop.max_positions = 2
-        settings.loop.hotswap_enabled = True
-        settings.loop.hotswap_min_confidence = 0.50
-        settings.loop.hotswap_red_majority_pct = 0.50
-        # Block normal TP/SL exits so the positions survive to the hotswap check.
-        settings.options.min_hold_hours = 1000.0
-        id0 = self._loser(store, "AAPL")
-        id1 = self._loser(store, "AAPL")
-        loser_ids = {id0, id1}
-
-        make_engine(settings, store).run_cycle()
-
-        closed_ids = {o["id"] for o in store.closed_options()}
-        assert closed_ids & loser_ids, "expected at least one loser to be hotswapped out"
-        activity = " ".join(a["summary"] for a in store.recent_activity(50)).lower()
-        assert "hotswap" in activity
-
-    def test_hotswap_does_not_fire_when_majority_green(self, settings, store):
-        """Full book of winners → hotswap must NOT kick in."""
-        settings.loop.max_positions = 2
-        settings.loop.hotswap_enabled = True
-        settings.loop.hotswap_min_confidence = 0.50
-        settings.loop.hotswap_red_majority_pct = 0.60
-        # Two deep-ITM AAPL calls — mark >> entry → pnl > 0 → green.
-        self._winner(store, "AAPL")
-        self._winner(store, "AAPL")
-
-        make_engine(settings, store).run_cycle()
-
-        activity = " ".join(a["summary"] for a in store.recent_activity(50)).lower()
-        assert "hotswap" not in activity
-
-    def test_hotswap_disabled_by_config(self, settings, store):
-        """hotswap_enabled=False suppresses hotswap even when conditions are met."""
-        settings.loop.max_positions = 2
-        settings.loop.hotswap_enabled = False
-        settings.loop.hotswap_red_majority_pct = 0.50
-        settings.options.min_hold_hours = 1000.0
-        self._loser(store, "AAPL")
-        self._loser(store, "AAPL")
-
-        make_engine(settings, store).run_cycle()
-
-        activity = " ".join(a["summary"] for a in store.recent_activity(50)).lower()
-        assert "hotswap" not in activity
-
-    def test_hotswap_not_triggered_when_book_not_full(self, settings, store):
-        """Free slots available → normal entry path, no hotswap."""
-        settings.loop.max_positions = 4
-        settings.loop.hotswap_enabled = True
-        settings.loop.hotswap_red_majority_pct = 0.50
-        settings.options.min_hold_hours = 1000.0
-        self._loser(store, "AAPL")   # 1 of 4 slots — still 3 free
-
-        make_engine(settings, store).run_cycle()
-
-        activity = " ".join(a["summary"] for a in store.recent_activity(50)).lower()
-        assert "hotswap" not in activity
-
-    def test_hotswap_evicts_smallest_loss_not_biggest(self, settings, store):
-        """Among two red positions the one with the smaller absolute loss is
-        evicted first (cheapest exit, minimises realised damage)."""
-        settings.universe = ["AAPL", "MSFT"]   # both get synthetic prices
-        settings.loop.max_positions = 2
-        settings.loop.hotswap_enabled = True
-        settings.loop.hotswap_min_confidence = 0.50
-        settings.loop.hotswap_red_majority_pct = 0.50
-        settings.options.min_hold_hours = 1000.0
-
-        # Big loser on AAPL: 2 contracts × entry 1.0 → estimated loss ≈ −2.0
-        big_id = self._loser(store, "AAPL", contracts=2.0, entry=1.0)
-        # Small loser on MSFT: 1 contract × entry 0.5 → estimated loss ≈ −0.5
-        small_id = self._loser(store, "MSFT", contracts=1.0, entry=0.5)
-
-        make_engine(settings, store).run_cycle()
-
-        closed = store.closed_options()
-        # Identify which of our two planted losers were closed this cycle.
-        planted_closed = [o for o in closed if o["underlying"] in ("AAPL", "MSFT")
-                          and o["id"] in (big_id, small_id)]
-        assert planted_closed, "expected at least one planted loser to be hotswapped"
-        if len(planted_closed) == 1:
-            assert planted_closed[0]["underlying"] == "MSFT", (
-                "hotswap must evict the smallest-loss position first (MSFT, loss≈−0.5)"
-            )
 
 
 class TestProfitStash:

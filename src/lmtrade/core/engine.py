@@ -45,6 +45,8 @@ from .state import Store, Trade
 OPTION_FEE = 0.1   # per option order (paper): smaller than TR's equity fee,
                    # comparable to warrant spreads on tiny notionals
 NEWS_MAX_AGE_S = 24 * 3600   # news older than this no longer influences decisions
+ANALYSIS_RETRY_S = 15 * 60   # when analysis is missing/unusable, retry this often
+                             # (not every cycle) so a provider outage doesn't hammer
 
 
 class Engine:
@@ -150,42 +152,6 @@ class Engine:
             }
         self.store.set_meta("open_option_marks", marks)
 
-    def _hotswap_candidate(self, prices: dict[str, float]) -> dict | None:
-        """Return the cheapest-to-exit losing position, or None when hotswap
-        conditions are not met.
-
-        Hotswap fires when >= `hotswap_red_majority_pct` of open positions
-        have negative unrealised P&L. Uses marks cached by the current cycle's
-        `_persist_option_marks` call; for positions without a fresh price falls
-        back to assuming mark = 0 (total-loss estimate — conservative but safe).
-
-        Returns the red position with the *highest* unrealised P&L (i.e. the
-        smallest absolute loss), which is the cheapest exit.
-        """
-        open_opts = self.store.open_options()
-        if not open_opts:
-            return None
-        cached = self.store.get_meta("open_option_marks") or {}
-
-        pnl_map: dict[int, float] = {}
-        for o in open_opts:
-            entry = cached.get(str(o["id"]))
-            if entry is not None:
-                pnl_map[o["id"]] = float(entry["unrealized_pnl"])
-            else:
-                # No price data this cycle — worst-case: mark = 0.
-                pnl_map[o["id"]] = -(float(o["entry_premium"]) * float(o["contracts"]))
-
-        red_count = sum(1 for v in pnl_map.values() if v < 0)
-        if red_count == 0:
-            return None
-        if red_count / len(open_opts) < self.settings.loop.hotswap_red_majority_pct:
-            return None
-
-        red_opts = [o for o in open_opts if pnl_map[o["id"]] < 0]
-        # max = highest (least negative) pnl = smallest absolute loss
-        return max(red_opts, key=lambda o: pnl_map[o["id"]])
-
     def _get_analysis_with_fallback(self) -> dict | None:
         """Get daily market analysis from store, falling back to paper store if live analysis
         is missing (useful when live mode doesn't have analysis but paper run does)."""
@@ -193,6 +159,23 @@ class Engine:
         if analysis is None and self.fallback_store is not None:
             analysis = self.fallback_store.get_meta("market_analysis")
         return analysis
+
+    def _analysis_current(self, analysis: dict | None) -> bool:
+        """True when a stored market analysis exists and is still inside its own
+        validity window (ts + valid_hours). Used to reuse a fresh analysis
+        across restarts instead of rebuilding it every launch. A malformed or
+        timestamp-less analysis counts as not current so it gets refreshed."""
+        if not isinstance(analysis, dict):
+            return False
+        ts = analysis.get("ts")
+        if ts is None:
+            return False
+        valid_h = analysis.get(
+            "valid_hours", self.settings.research.daily_analysis_interval_hours)
+        try:
+            return (self.now() - float(ts)) < float(valid_h) * 3600
+        except (TypeError, ValueError):
+            return False
 
     # ------------------------------------------------------------ research jobs
     def _run_scheduled_jobs(self) -> None:
@@ -225,13 +208,17 @@ class Engine:
                                on_progress=_news_progress)
             self.bus.info("[research] news fetch complete", source="research")
         daily_iv = self.settings.research.daily_analysis_interval_hours * 3600
-        # Compile a fresh per-symbol analysis when the schedule is due OR when
-        # none exists yet — an empty analysis (e.g. right after a reset) is
-        # important missing signal, so we compile it before the first trades
-        # rather than waiting a full day. `due()` is called first so its
-        # last-run stamp advances on the scheduled path.
-        analysis_missing = not self.store.get_meta("market_analysis")
-        if self.scheduler.due("daily_analysis", daily_iv) or analysis_missing:
+        # Reuse an up-to-date analysis already in the DB instead of rebuilding
+        # it on every (re)start: a stored analysis is current while it's inside
+        # its own validity window (ts + valid_hours). Only when it's missing or
+        # stale do we (re)compile — gated by the scheduler so a provider outage
+        # retries periodically rather than every cycle. When it IS current we
+        # still advance the daily stamp so a fresh scheduler (post-restart)
+        # doesn't consider it overdue and thrash.
+        existing = self.store.get_meta("market_analysis")
+        if self._analysis_current(existing):
+            self.scheduler.due("daily_analysis", daily_iv)
+        elif self.scheduler.due("daily_analysis", ANALYSIS_RETRY_S):
             provider = self.settings.research.analysis_provider
             self.bus.info(
                 f"[research] compiling daily market analysis (provider={provider}) "
@@ -534,18 +521,12 @@ class Engine:
         control = ControlState.load(self.settings.control_path)
         broker_armed = getattr(self.broker, "armed", False)
         has_place_order = hasattr(self.broker, "place_order")
-        net_worth = self.broker.cash()
-        can_execute = control.is_executing(net_worth)
-        armed_real = broker_armed and has_place_order and can_execute
-        
-        if not armed_real and broker_armed:
-            # Debug: show why execution didn't happen even though broker is armed
-            self.bus.info(
-                f"[execution] {quote.symbol} {decision.direction}: "
-                f"broker_armed={broker_armed} has_place_order={has_place_order} "
-                f"control.is_executing={can_execute} (net_worth={net_worth:.2f})",
-                source="engine")
-        
+        # The broker is only ever constructed armed when the control plane is
+        # live+armed (see cli._build_engine_for_control), so an armed broker IS
+        # the routing signal for real execution. The runtime low-balance guard
+        # below is re-checked against the live balance on every order.
+        armed_real = broker_armed and has_place_order
+
         if armed_real:
             # Runtime low-balance guard (second arming switch): below
             # LOW_BALANCE_EUR the flat ~1 EUR fee is a >1% drag, so real orders
@@ -571,10 +552,10 @@ class Engine:
                 self.bus.warn(f"LIVE knockout order rejected [{ko.isin}]: "
                               f"{res.message}", source="engine")
                 return True   # never fall back to synthetic once live-armed
+            # Real fill: cash is the REAL TR account (no local ledger to debit).
+            # The live view's balances come from TR; we only record the fee for
+            # cost accounting and then book the position locally.
             contracts = float(size)
-            cost = contracts * ko.price + OPTION_FEE
-            if not self.broker.adjust_cash(-cost):
-                return True
             self.store.record_cost("fee", OPTION_FEE, "options")
         else:
             cost = contracts * ko.price + OPTION_FEE
@@ -766,38 +747,6 @@ class Engine:
                     f"position book full ({open_count}/{self.settings.loop.max_positions}) "
                     f"— no free slots, holding existing positions this cycle",
                     source="engine")
-                # Experimental hotswap: when the majority of open positions are
-                # losing money, close the cheapest loser to make room for a
-                # potentially stronger entry this cycle.
-                if self.settings.loop.hotswap_enabled:
-                    evict = self._hotswap_candidate(prices)
-                    if evict is not None:
-                        spot = prices.get(evict["underlying"], 0.0)
-                        mark = self._mark_position(evict, spot) if spot > 0 else 0.0
-                        entry = float(evict["entry_premium"])
-                        contracts = float(evict["contracts"])
-                        pnl = (mark - entry) * contracts - OPTION_FEE
-                        proceeds = max(0.0, mark * contracts - OPTION_FEE)
-                        self.broker.adjust_cash(proceeds)
-                        self.store.record_cost("fee", OPTION_FEE, "options")
-                        self.store.close_option(evict["id"], mark, pnl)
-                        stash_pct = self.settings.economics.profit_stash_pct
-                        if pnl > 0 and stash_pct > 0:
-                            stash = pnl * stash_pct
-                            if self.broker.adjust_cash(-stash):
-                                self.store.add_reserve(stash)
-                        self.store.record_trade(Trade(
-                            evict["underlying"], "sell", contracts, mark, OPTION_FEE,
-                            self.broker.mode,
-                            f"close {evict['kind']} — hotswap: freed slot for stronger entry",
-                            None))
-                        self.bus.activity(
-                            "trade",
-                            f"HOTSWAP CLOSE {evict['kind'].upper()} {evict['underlying']} "
-                            f"pnl {pnl:+.3f} — replaced by stronger signal",
-                            evict["underlying"], {"pnl": round(pnl, 4), "hotswap": True})
-                        self._record_learning(evict.get("genome_id"), pnl)
-                        slots = 1
             candidates: list[tuple[Decision, str | None]] = []
             for symbol in self.settings.universe:
                 if slots <= 0:
