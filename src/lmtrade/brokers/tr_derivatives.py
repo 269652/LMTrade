@@ -154,16 +154,21 @@ class PytrDerivatives(TRDerivativesBase):
                 return isin
         return None
 
+    # Best-effort productCategory value — TR's backend rejected the plain
+    # "knockout" as a schema-invalid payload against a live account (seen as
+    # a JSON_PARSE_ERROR/"validation failed" from TR's own MAPPER service).
+    # This environment has no live TR access to verify the exact value, so
+    # this is a single educated guess: TR's other subscription type names are
+    # camelCase compounds (portfolioAggregateHistory, instrumentSuitability,
+    # timelineDetailV2), matching this value's shape better than the flat
+    # lowercase one did.
+    PRODUCT_CATEGORY = "knockOutProduct"
+
     async def _fetch_derivatives(self, api: Any, isin: str) -> list[dict]:
-        # "knockout" is the best-effort productCategory value (TR's own app
-        # terminology) — this environment cannot reach TR's live websocket
-        # API to verify the exact request/response schema against a real
-        # account. debug-logging the raw payload here so a live run can
-        # confirm/correct it quickly if this comes back empty in practice.
-        sub_id = await api.search_derivative(isin, "knockout")
+        sub_id = await api.search_derivative(isin, self.PRODUCT_CATEGORY)
         _, _, payload = await api.recv()
         await api.unsubscribe(sub_id)
-        log.debug("TR search_derivative(%s, knockout) -> %r", isin, payload)
+        log.debug("TR search_derivative(%s, %s) -> %r", isin, self.PRODUCT_CATEGORY, payload)
         return (payload or {}).get("results", [])
 
     def search(self, underlying: str, direction: str) -> list[TRDerivativeQuote]:

@@ -167,7 +167,7 @@ class TestPytrSearchGlue:
         assert quotes[0].kind == "ko_call"
         assert quotes[0].leverage == pytest.approx(5.0)
         assert ("search", "AAPL", "stock") in api.calls
-        assert ("search_derivative", "US0378331005", "knockout") in api.calls
+        assert ("search_derivative", "US0378331005", "knockOutProduct") in api.calls
 
     def test_sell_direction_maps_to_ko_put(self):
         api = FakeAsyncTRApi(
