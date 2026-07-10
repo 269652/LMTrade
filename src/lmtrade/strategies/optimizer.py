@@ -84,6 +84,7 @@ class StrategyOptimizer:
         if store.get_meta(GENOMES_KEY) is None:
             self._save(self._seed_population())
         else:
+            self._prune_unknown_strategies()
             self._ensure_families()
 
     # -- persistence ------------------------------------------------------------
@@ -105,6 +106,26 @@ class StrategyOptimizer:
                 params = self._mutate_params(name, params)
             out.append(Genome(id=uuid.uuid4().hex[:8], strategy=name, params=params))
         return out
+
+    def _prune_unknown_strategies(self) -> None:
+        """Remove genomes whose strategy was retired from the registry (e.g.
+        the removed 'hotswap' experiment). Without this, a genome persisted
+        under a name no longer in STRATEGIES crashes the engine with a
+        KeyError the moment it's selected or evolved — observed live as
+        'engine cycle error: hotswap'. Each pruned genome is replaced with a
+        fresh genome of a currently-registered family, keeping population
+        size stable."""
+        genomes = self.genomes()
+        valid = [g for g in genomes if g.strategy in STRATEGIES]
+        removed = len(genomes) - len(valid)
+        if removed == 0:
+            return
+        names = list(STRATEGIES)
+        for i in range(removed):
+            name = names[i % len(names)]
+            valid.append(Genome(id=uuid.uuid4().hex[:8], strategy=name,
+                                params=dict(STRATEGIES[name].default_params)))
+        self._save(valid)
 
     def _ensure_families(self) -> None:
         """Inject any strategy family registered AFTER this population was

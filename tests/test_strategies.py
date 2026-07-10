@@ -173,3 +173,42 @@ class TestFamilyInjection:
         assert "rel_value" in strategies, (
             "optimizer should inject genomes for families the stored population lacks"
         )
+
+
+class TestUnknownStrategyPruning:
+    """Regression: a genome persisted under a strategy name that was later
+    retired from the registry (e.g. the removed 'hotswap' experiment) must
+    not crash the bot. Live incident: 'engine cycle error: hotswap' —
+    STRATEGIES['hotswap'] KeyError the moment the stale genome was selected
+    or evolved. Loading the optimizer must prune such genomes and backfill
+    with a currently-registered family, keeping the population size stable."""
+
+    def test_unknown_strategy_genome_is_pruned_on_load(self, store):
+        from lmtrade.strategies.optimizer import Genome
+        import uuid
+        stale = [
+            Genome(id=uuid.uuid4().hex[:8], strategy=s, params={})
+            for s in ("momentum", "mean_reversion", "hotswap")
+        ]
+        opt = StrategyOptimizer(store, population=3, rng=random.Random(42))
+        opt._save(stale)
+
+        opt2 = StrategyOptimizer(store, population=3, rng=random.Random(1))
+        genomes = opt2.genomes()
+        assert all(g.strategy in STRATEGIES for g in genomes), (
+            "no genome should reference a retired/unregistered strategy"
+        )
+        assert len(genomes) == 3   # population size preserved
+
+    def test_pruned_population_is_safe_to_select_and_signal(self, store):
+        from lmtrade.strategies.optimizer import Genome
+        import uuid
+        stale = [Genome(id=uuid.uuid4().hex[:8], strategy="hotswap", params={})]
+        opt = StrategyOptimizer(store, population=1, rng=random.Random(42))
+        opt._save(stale)
+
+        opt2 = StrategyOptimizer(store, population=1, rng=random.Random(1))
+        g = opt2.select()               # must not KeyError
+        d, s = g.signal(rising())       # must not KeyError
+        assert d in ("buy", "sell", "hold")
+        assert 0.0 <= s <= 1.0
