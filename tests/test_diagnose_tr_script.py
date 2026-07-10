@@ -97,6 +97,23 @@ class TestFindCandidateFields:
         assert diagnose_tr._find_candidate_fields({"foo": 1, "bar": 2}) == {}
 
 
+class TestProductCategories:
+    """The authoritative answer to 'does TR offer plain options for this
+    symbol' is TR's own derivativeProductCategories field on the ISIN
+    search result — not a guessed list of category names to try."""
+
+    def test_extracts_categories_from_isin_result(self, diagnose_tr):
+        result = {"isin": "US0378331005",
+                  "derivativeProductCategories": ["knockOutProduct", "vanillaWarrant"]}
+        assert diagnose_tr._product_categories(result) == ["knockOutProduct", "vanillaWarrant"]
+
+    def test_missing_field_returns_empty(self, diagnose_tr):
+        assert diagnose_tr._product_categories({"isin": "US0378331005"}) == []
+
+    def test_non_dict_returns_empty(self, diagnose_tr):
+        assert diagnose_tr._product_categories(None) == []
+
+
 class TestDiagnoseDerivativeItems:
     def test_reports_wrong_field_name_as_unparsed_not_silent_zero(self, diagnose_tr, capsys):
         # The live incident: real fields under different names than

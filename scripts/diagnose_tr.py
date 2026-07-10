@@ -103,6 +103,16 @@ def _find_candidate_fields(item: dict) -> dict:
             if any(hint in str(k).lower() for hint in _FIELD_HINTS)}
 
 
+def _product_categories(isin_search_result: dict) -> list[str]:
+    """TR's OWN authoritative list of derivative product types for an
+    underlying, straight from its instrument search result
+    (derivativeProductCategories) — the real answer to 'does TR offer plain
+    options for this symbol', not a guess at category names to try."""
+    if not isinstance(isin_search_result, dict):
+        return []
+    return list(isin_search_result.get("derivativeProductCategories") or [])
+
+
 def _diagnose_derivative_items(items: list, symbol: str, parser_name: str) -> object | None:
     """For a sample of raw instruments: dump the full raw JSON, run the
     bot's ACTUAL parser against it (showing what it extracts or why it
@@ -249,12 +259,14 @@ def main() -> int:
     ok, result = loop.run_until_complete(
         _query(api, api.search(symbol, asset_type="stock"), _recv_for))
     isin = None
+    matched_result = None
     if ok:
         _ok("search subscription answered")
         _dump("raw payload", result)
         for r in (result or {}).get("results", []):
             if r.get("isin"):
                 isin = r["isin"]
+                matched_result = r
                 break
         if isin:
             _ok(f"Resolved {symbol} -> ISIN {isin}")
@@ -262,6 +274,36 @@ def main() -> int:
             _fail(f"No ISIN found for {symbol} in the results above.")
     else:
         _fail(f"search failed: {result!r}")
+
+    if matched_result is not None:
+        _section(f"Derivative product categories TR advertises for {symbol}")
+        advertised = _product_categories(matched_result)
+        known = {c for c, _, _ in PytrDerivatives._CATEGORIES}
+        if advertised:
+            _dump("derivativeProductCategories (from the ISIN search result "
+                  "above — TR's own authoritative list, not a guess)",
+                  advertised)
+            unqueried = [c for c in advertised if c not in known]
+            if unqueried:
+                _fail(f"TR advertises {unqueried} for {symbol} but this bot "
+                      f"does NOT query {'it' if len(unqueried) == 1 else 'them'} "
+                      f"yet — add to PytrDerivatives._CATEGORIES in "
+                      f"tr_derivatives.py if this should be tradeable.")
+            else:
+                _ok(f"This bot already queries every category TR advertises "
+                    f"for {symbol}: {sorted(known)}.")
+            if "vanillaOption" not in advertised and "option" not in advertised:
+                _info("No plain/listed-option category advertised for this "
+                      "symbol — 'vanillaWarrant' (Optionsschein) is the "
+                      "closest TR product to a plain option: same "
+                      "call/put/strike/expiry shape, but it's an issuer "
+                      "certificate (Société Générale etc.), not an "
+                      "exchange-listed contract, so external option-chain "
+                      "data (yfinance etc.) won't have this exact ISIN.")
+        else:
+            _fail(f"No derivativeProductCategories field on the {symbol} "
+                  f"search result — cannot tell what TR offers for it from "
+                  f"this payload alone.")
 
     priced_candidate = None
     if isin:
