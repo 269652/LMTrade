@@ -51,6 +51,38 @@ def test_exits_cleanly_without_credentials(monkeypatch):
     assert "TR_PHONE" in result.stdout
 
 
+class TestCredentialLoading:
+    """Regression: the script called secret('TR_PHONE') directly, but
+    .env-file loading is a side effect of load_settings() / _load_dotenv() —
+    secret() only reads os.environ. A user with TR_PHONE/TR_PIN ONLY in
+    .env (not their shell environment) got 'not set' even though the file
+    genuinely had them, because the script never loaded the .env file at
+    all."""
+
+    def test_loads_credentials_from_dotenv_file(self, diagnose_tr, tmp_path, monkeypatch):
+        import lmtrade.config as config
+
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)
+        monkeypatch.delenv("TR_PHONE", raising=False)
+        monkeypatch.delenv("TR_PIN", raising=False)
+        (tmp_path / ".env").write_text("TR_PHONE=+491234567\nTR_PIN=1234\n")
+
+        phone, pin = diagnose_tr._load_credentials()
+        assert phone == "+491234567"
+        assert pin == "1234"
+
+    def test_shell_env_still_works_without_a_dotenv_file(self, diagnose_tr, tmp_path, monkeypatch):
+        import lmtrade.config as config
+
+        monkeypatch.setattr(config, "REPO_ROOT", tmp_path)   # no .env here
+        monkeypatch.setenv("TR_PHONE", "+49999")
+        monkeypatch.setenv("TR_PIN", "5678")
+
+        phone, pin = diagnose_tr._load_credentials()
+        assert phone == "+49999"
+        assert pin == "5678"
+
+
 class TestFindCandidateFields:
     def test_finds_fields_by_name_hint_regardless_of_exact_guess(self, diagnose_tr):
         item = {"isin": "DE1", "strikePrice": 100.0, "leverageFactor": 5.0,

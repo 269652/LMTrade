@@ -33,6 +33,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from lmtrade.config import secret  # noqa: E402
 
 
+def _load_credentials() -> tuple[str | None, str | None]:
+    """TR_PHONE/TR_PIN from the shell environment OR a .env file at the repo
+    root. secret() only reads os.environ — loading .env is a side effect of
+    load_settings(), which this standalone script never calls — so without
+    this, credentials that exist ONLY in .env (never exported to the shell)
+    read as 'not set' even though the file genuinely has them. Imported
+    inside the function (not at module top) so a monkeypatched REPO_ROOT in
+    tests is honored."""
+    from lmtrade.config import REPO_ROOT, _load_dotenv
+
+    _load_dotenv(REPO_ROOT / ".env")
+    return secret("TR_PHONE"), secret("TR_PIN")
+
+
 def _ok(msg: str) -> None:
     print(f"  \033[32m✓\033[0m {msg}")
 
@@ -152,8 +166,7 @@ def main() -> int:
     symbol = sys.argv[1] if len(sys.argv) > 1 else "AAPL"
 
     _section("Credentials")
-    phone = secret("TR_PHONE")
-    pin = secret("TR_PIN")
+    phone, pin = _load_credentials()
     if not (phone and pin):
         _fail("TR_PHONE / TR_PIN not set (env or .env). Nothing else can run.")
         return 1
