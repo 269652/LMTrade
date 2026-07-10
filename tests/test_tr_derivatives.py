@@ -685,6 +685,42 @@ class TestPriceForOrderPricing:
         blob = " ".join(r.message for r in caplog.records)
         assert "unrecognized" in blob   # raw payload dumped for correction
 
+    def test_both_time_out_returns_none_without_dropping_the_session(self):
+        # Live incident: on a real account, cash()/portfolio() worked fine
+        # (the session is healthy) but priceForOrder AND ticker both timed
+        # out cleanly for one specific instrument — plausibly because its
+        # issuer only quotes it while the underlying's home market is open,
+        # not a dead session. A clean TimeoutError must NOT be treated the
+        # same as a transport/session error: no data this cycle is not the
+        # same failure as a broken websocket, and dropping a healthy shared
+        # session on every quiet-market cycle forces a needless re-login.
+        class BothTimeOut(FakeAsyncTRApi):
+            async def ticker(self, isin, exchange="LSX"):
+                self.calls.append(("ticker", isin, exchange))
+                return f"sub-ticker-{isin}"
+
+            async def recv(self):
+                if self.calls[-1][0] in ("price_for_order", "ticker"):
+                    raise TimeoutError(
+                        "no frame received within 15s waiting for subscription x")
+                return await super().recv()
+
+            async def price_for_order(self, isin, exchange, order_type):
+                self.calls.append(("price_for_order", isin, exchange, order_type))
+                return f"sub-pfo-{isin}"
+
+        api = BothTimeOut(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [{"isin": "DE000KO1", "optionType": "long",
+                                     "strike": 170.0, "barrier": 170.0,
+                                     "size": 10.0, "leverage": 5.0}],
+                "vanillaWarrant": [],
+            })
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.find_knockout("AAPL", "buy", 175.0, 5.0) is None
+        assert client._api is not None   # session kept — it was never the problem
+
 
 class TestRecvForTimeout:
     """Live incident: ticker(isin) on some instruments never produced a
@@ -732,10 +768,13 @@ class TestRecvForTimeout:
 
 
 class TestTickerTimeoutDegradesGracefully:
-    """find_knockout()'s ticker fetch must degrade the same way on a timeout
-    as on any other transport error (test_ticker_fetch_error_returns_none_
-    and_drops_session above) — return None and drop the session so the next
-    cycle re-resumes, rather than propagating a raw TimeoutError."""
+    """find_knockout()'s ticker fetch must degrade on a timeout — return
+    None rather than propagating a raw TimeoutError. Unlike a genuine
+    transport/session error (test_ticker_fetch_error_returns_none_and_drops
+    _session above), a clean timeout does NOT drop the session: see
+    TestPriceForOrderPricing.test_both_time_out_returns_none_without_
+    dropping_the_session for why (cash()/portfolio() can be fine on the
+    same session while one instrument's quote just never arrives)."""
 
     def test_ticker_timeout_returns_none_and_drops_session(self, monkeypatch):
         import lmtrade.brokers.tr_derivatives as tr_derivatives
@@ -764,7 +803,7 @@ class TestTickerTimeoutDegradesGracefully:
             })
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
         assert client.find_knockout("AAPL", "buy", 175.0, 5.0) is None
-        assert client._api is None   # session dropped so the next attempt re-resumes
+        assert client._api is not None   # session kept — a timeout isn't a dead session
 
 
 class TestPytrSearchDiagnostics:

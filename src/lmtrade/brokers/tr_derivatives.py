@@ -577,6 +577,19 @@ class PytrDerivatives(TRDerivativesBase):
             try:
                 payload = asyncio.get_event_loop().run_until_complete(
                     self._fetch_ticker(api, candidate.isin))
+            except TimeoutError as exc:
+                # Live incident: cash()/portfolio() answered fine on the same
+                # session (it's healthy) while priceForOrder AND ticker both
+                # timed out cleanly for one specific instrument — plausibly
+                # because its issuer only quotes it while the underlying's
+                # home market is open. A clean timeout means "no data this
+                # cycle", not "the session is dead" — dropping a healthy
+                # shared session on every quiet-market cycle would force a
+                # needless re-login instead of just skipping this instrument.
+                log.info("TR priceForOrder/ticker(%s) timed out (%s) — no "
+                        "quote available this cycle, session kept.",
+                        candidate.isin, exc)
+                return None
             except Exception as exc:  # noqa: BLE001
                 log.warning("TR ticker fetch failed for %s (%s) — dropping "
                             "session, will re-login.", candidate.isin, exc)
