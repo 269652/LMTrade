@@ -574,13 +574,21 @@ class TestEngineIntegration:
         assert o["barrier"] == pytest.approx(80.0)
         assert o["tp_premium"] and o["sl_premium"]   # stops still placed
 
-    def test_without_tr_client_falls_back_to_bs_options(self, settings, store):
+    def test_without_tr_client_opens_nothing(self, settings, store):
+        # Policy: ONLY real TR derivatives are ever traded, in paper AND live —
+        # no synthetic Black-Scholes fallback. Without a TR client, the engine
+        # must skip the entry rather than fabricate a local instrument.
         engine = self._engine(settings, store, client=None)
         engine.run_cycle()
-        opts = store.open_options()
-        assert opts
-        assert opts[0]["instrument_type"] == "option"   # legacy path unchanged
-        assert opts[0]["isin"] is None
+        assert store.open_options() == []
+
+    def test_no_matching_instrument_opens_nothing(self, settings, store):
+        # TR client IS available but the catalog has nothing to trade —
+        # still no synthetic fallback.
+        client = FakeTRDerivatives(catalog={})
+        engine = self._engine(settings, store, client)
+        engine.run_cycle()
+        assert store.open_options() == []
 
     def test_run_cycle_persists_tr_account_cash(self, settings, store):
         class CashClient(FakeTRDerivatives):

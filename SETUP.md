@@ -77,12 +77,14 @@ single call where the AskUserQuestion tool allows multiple questions at once.
       need this if they're using the hourly Routine).
     - `VAST_API_KEY` — only if deploying to a Vast.ai GPU box.
     - Ollama host / SLM model — only if running a local SLM.
-11. **Trade Republic credentials** — ask in two cases. (a) The user chose
-    `live` mode in question 1, or (b) the user wants **paper trading on
-    real TR instruments** (`tr.use_derivatives`): with `TR_PHONE`/`TR_PIN`
-    set, the bot selects real TR knockout certificates (real ISINs, barrier
-    pricing) for its simulated trades instead of synthetic options — no
-    orders are ever placed. Trade Republic has **no API key** — the
+11. **Trade Republic credentials** — REQUIRED for options trading in either
+    mode (there is no synthetic-instrument fallback). Ask in two cases.
+    (a) The user chose `live` mode in question 1, or (b) the user wants
+    **paper trading on real TR instruments** (`tr.use_derivatives`): with
+    `TR_PHONE`/`TR_PIN` set, the bot selects real TR knockout certificates
+    (real ISINs, barrier pricing) for its simulated trades — without
+    credentials, no options positions will ever open even in paper mode. No
+    orders are ever placed in paper mode. Trade Republic has **no API key** — the
     unofficial adapter uses phone number + app PIN (same as the mobile
     app), first pairing needs one interactive 2FA — run
     `pytr login -n "<TR_PHONE value>" -p "<TR_PIN value>" --store_credentials`

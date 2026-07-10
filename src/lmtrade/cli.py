@@ -85,8 +85,16 @@ def _print_diagnostics(settings, engine) -> None:
         else:
             console.print(
                 "[bold red]TR live derivatives: unavailable[/bold red] — see "
-                "warning above; falling back to synthetic options."
+                "warning above; NO new positions will open (no synthetic "
+                "fallback) until the TR session is restored."
             )
+    elif settings.options.enabled:
+        console.print(
+            "[bold red]TR derivatives disabled/not configured[/bold red] — "
+            "set TR_PHONE/TR_PIN and tr.use_derivatives=true. With options "
+            "enabled and no TR client, NO new positions will ever open (there "
+            "is no synthetic fallback)."
+        )
 
 
 @app.command()

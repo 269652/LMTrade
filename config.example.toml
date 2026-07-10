@@ -30,7 +30,7 @@ max_new_positions_per_cycle = 0   # cap NEW entries per cycle ("trades per
                                   # hour" = this x cycles-per-hourly-run;
                                   # 0 = no extra cap, fill up to max_positions)
 
-[options]                    # synthetic options layer (paper trading)
+[options]                    # options/knockout trading layer (real TR instruments only)
 enabled = true
 expiry_days = 7.0
 max_option_fraction = 0.15   # max fraction of equity risked in one position
@@ -67,11 +67,12 @@ epsilon = 0.2                # exploration rate for the strategy optimizer
 [benchmark]
 symbol = "SPY"                # "retail baseline" the bot is measured against
 
-[tr]                          # real-TR-instrument paper trading (optional)
-use_derivatives = true        # inert unless TR_PHONE/TR_PIN are set in .env;
-                              # with credentials, paper trades use REAL TR
-                              # knockout certificates (real ISINs, barrier
-                              # pricing) instead of synthetic options
+[tr]                          # required for options trading (paper AND live)
+use_derivatives = true        # with [options] enabled, ONLY real TR knockout
+                              # certificates (real ISINs, barrier pricing) are
+                              # ever traded — no synthetic fallback. Requires
+                              # TR_PHONE/TR_PIN in .env; without them, no
+                              # options positions will ever open.
 target_leverage = 5.0         # preferred knockout leverage (clamped 2-20)
 
 [sizing]                      # quantitative sizing layer

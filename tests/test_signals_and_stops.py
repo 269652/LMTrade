@@ -68,8 +68,10 @@ def store(settings: Settings):
 
 
 def make_engine(settings, store, market) -> Engine:
+    from _tr_test_helpers import AnyKnockoutTR
+
     broker = PaperBroker(store, starting_cash=settings.budget, fee=0.1)
-    return Engine(settings, store, broker, market=market)
+    return Engine(settings, store, broker, market=market, tr_derivatives=AnyKnockoutTR())
 
 
 # --------------------------------------------------------------------------- #

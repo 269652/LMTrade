@@ -57,7 +57,21 @@ class TestPaperBrokerCash:
 
 class TestOptionsTrading:
     def test_engine_opens_option_with_genome_attribution(self, settings, store):
-        engine = make_engine(settings, store)
+        # Policy: only real TR knockout instruments are ever traded (paper
+        # simulates the fill; no synthetic Black-Scholes fallback), so opening
+        # a position in a test requires a TR client with a catalog.
+        from lmtrade.brokers.tr_derivatives import FakeTRDerivatives, TRDerivativeQuote
+
+        client = FakeTRDerivatives(catalog={
+            "AAPL": [TRDerivativeQuote(isin="DE000TEST1", underlying="AAPL",
+                                       kind="ko_call", strike=80.0, barrier=80.0,
+                                       ratio=10.0, price=2.05, leverage=5.0,
+                                       issuer="TestBank"),
+                     TRDerivativeQuote(isin="DE000TEST2", underlying="AAPL",
+                                       kind="ko_put", strike=120.0, barrier=120.0,
+                                       ratio=10.0, price=2.05, leverage=5.0,
+                                       issuer="TestBank")]})
+        engine = make_engine(settings, store, tr_derivatives=client)
         cash_before = engine.broker.cash()
         for _ in range(5):
             engine.run_cycle()
@@ -66,7 +80,8 @@ class TestOptionsTrading:
         opts = store.open_options()
         assert opts, "engine should open at least one option position"
         assert opts[0]["underlying"] == "AAPL"
-        assert opts[0]["kind"] in ("call", "put")
+        assert opts[0]["kind"] in ("ko_call", "ko_put")
+        assert opts[0]["isin"] in ("DE000TEST1", "DE000TEST2")
         assert opts[0]["contracts"] > 0
         if settings.learning.enabled:
             assert opts[0]["genome_id"]

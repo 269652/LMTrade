@@ -29,7 +29,7 @@ from ..finance.knockouts import (
     knockout_price,
     strike_after_financing,
 )
-from ..finance.options import mark_option, synth_option
+from ..finance.options import mark_option
 from ..finance.risk import should_exit, size_position
 from ..finance.sizing import kelly_fraction, regime, vol_scale
 from ..models.base import Signal
@@ -496,8 +496,9 @@ class Engine:
 
     def _enter_knockout(self, quote: Quote, decision: Decision,
                         genome_id: str | None) -> bool:
-        """Open a real-ISIN TR knockout (paper fill). Returns False when no
-        TR client / no suitable instrument — caller falls back to options."""
+        """Open a real-ISIN TR knockout (paper: simulated fill; armed live: a
+        real order). Returns False when no TR client / no suitable instrument
+        — the caller skips this cycle rather than fabricate a synthetic one."""
         tr = self.tr_derivatives
         if tr is None or not tr.available():
             return False
@@ -585,36 +586,6 @@ class Engine:
             quote.symbol, {"genome": genome_id, "isin": ko.isin,
                            "leverage": ko.leverage})
         return True
-
-    def _enter_option(self, quote: Quote, decision: Decision, genome_id: str | None) -> None:
-        cfg = self.settings.options
-        kind = "call" if decision.direction == "buy" else "put"
-        oq = synth_option(quote.symbol, quote.price, quote.history, kind,
-                          expiry_days=cfg.expiry_days)
-        budget = self._position_budget(quote, decision, genome_id)
-        if budget <= 0.05:
-            return
-        contracts = budget / oq.premium
-        cost = contracts * oq.premium + OPTION_FEE
-        if not self.broker.adjust_cash(-cost):
-            return
-        self.store.record_cost("fee", OPTION_FEE, "options")
-        # Explicit stops placed with the order: every position always carries
-        # its own TP/SL, immune to later config changes.
-        tp_premium = oq.premium * (1 + cfg.take_profit_pct)
-        sl_premium = oq.premium * (1 - cfg.stop_loss_pct)
-        self.store.open_option(quote.symbol, kind, oq.strike, oq.expiry_ts,
-                               oq.iv, contracts, oq.premium, genome_id,
-                               tp_premium=tp_premium, sl_premium=sl_premium)
-        self.store.record_trade(Trade(
-            quote.symbol, "buy", contracts, oq.premium, OPTION_FEE,
-            self.broker.mode, f"open {kind} K={oq.strike} — {decision.rationale}",
-            decision.confidence))
-        self.bus.activity(
-            "trade",
-            f"OPEN {kind.upper()} {quote.symbol} K={oq.strike} ×{contracts:.3f} "
-            f"@ {oq.premium:.3f} (IV {oq.iv:.0%})",
-            quote.symbol, {"genome": genome_id, "delta": round(oq.delta, 3)})
 
     def _enter_equity(self, quote: Quote, decision: Decision, econ) -> None:
         pos = self.store.position(quote.symbol)
@@ -784,27 +755,22 @@ class Engine:
             for decision, genome_id in candidates[:take]:
                 quote = quotes[decision.symbol]
                 if self.settings.options.enabled:
-                    # Prefer real TR knockout instruments when the (optional)
-                    # TR client is authenticated; fall back to synthetic
-                    # Black-Scholes options otherwise.
+                    # ONLY real TR knockout instruments are ever traded — in
+                    # paper AND live — real ISIN/strike/barrier/price from the
+                    # TR catalog. Paper mode simulates the fill locally; live
+                    # mode places a real order. There is no synthetic
+                    # Black-Scholes fallback in either mode: a fabricated local
+                    # position (no TR client, session down, or no suitable
+                    # instrument) is a phantom the TR app never sees.
                     self.bus.info(
                         f"[execution] entering {decision.symbol} {decision.direction} "
                         f"in {self.broker.mode} mode (broker.armed={getattr(self.broker, 'armed', False)})",
                         source="engine")
                     if not self._enter_knockout(quote, decision, genome_id):
-                        # In ARMED live mode a synthetic option is a PHANTOM: it
-                        # books a local position that was NEVER sent to TR, so
-                        # the dashboard shows "trades" the TR app doesn't have.
-                        # Only simulate (synthetic options) in paper/unarmed
-                        # mode; in armed live, skip when no real instrument is
-                        # tradeable.
-                        if getattr(self.broker, "armed", False):
-                            self.bus.warn(
-                                f"LIVE {decision.symbol}: no real TR knockout "
-                                f"tradeable this cycle — skipping (no synthetic "
-                                f"fallback in armed live mode).", source="engine")
-                        else:
-                            self._enter_option(quote, decision, genome_id)
+                        self.bus.warn(
+                            f"{decision.symbol}: no real TR knockout tradeable "
+                            f"this cycle — skipping (synthetic instruments are "
+                            f"disabled).", source="engine")
                 else:
                     self._enter_equity(quote, decision, econ)
 

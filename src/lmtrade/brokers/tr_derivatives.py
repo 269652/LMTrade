@@ -336,17 +336,19 @@ class PytrDerivatives(TRDerivativesBase):
                     continue  # tolerate payload drift per-instrument
             if items and not out:
                 # TR returned instruments but our field mapping matched none —
-                # this is exactly why positions silently become synthetic
-                # options (no ISIN). Dump the real field names so the mapping
-                # above can be corrected against a live account; without TR
-                # access from the dev environment this is unverifiable in code.
+                # this symbol will simply have no tradeable instrument this
+                # cycle (no synthetic fallback). Dump the real field names so
+                # the mapping above can be corrected against a live account;
+                # without TR access from the dev environment this is
+                # unverifiable in code.
                 log.warning(
                     "TR knockout search for %s: %d instrument(s) returned but "
                     "NONE parsed (first error: %r). Actual fields on the first "
                     "item: %s. The response field mapping in tr_derivatives.py "
-                    "needs updating for your pytr/TR version — falling back to "
-                    "synthetic options (no ISIN) meanwhile.",
-                    underlying, len(items), first_error, sorted(items[0].keys()))
+                    "needs updating for your pytr/TR version — no positions "
+                    "will open for %s until this is fixed.",
+                    underlying, len(items), first_error, sorted(items[0].keys()),
+                    underlying)
             elif out:
                 log.info("TR knockout search for %s: %d raw -> %d usable instrument(s).",
                          underlying, len(items), len(out))

@@ -50,8 +50,10 @@ def store(settings: Settings):
 
 
 def make_engine(settings, store, market) -> Engine:
+    from _tr_test_helpers import AnyKnockoutTR
+
     broker = PaperBroker(store, starting_cash=settings.budget, fee=0.1)
-    return Engine(settings, store, broker, market=market)
+    return Engine(settings, store, broker, market=market, tr_derivatives=AnyKnockoutTR())
 
 
 class TestMinHoldHours:
@@ -153,8 +155,10 @@ class TestMaxNewPositionsPerCycle:
             "CCC": Quote("CCC", 300.0, buy_signal_history(300.0), "yahoo"),
             "DDD": Quote("DDD", 300.0, buy_signal_history(300.0), "yahoo"),
         })
+        from _tr_test_helpers import AnyKnockoutTR
+
         broker = PaperBroker(store, starting_cash=settings.budget, fee=0.1)
-        engine = Engine(settings, store, broker, market=market)
+        engine = Engine(settings, store, broker, market=market, tr_derivatives=AnyKnockoutTR())
 
         def fake_decide(quote):
             return Decision(quote.symbol, "buy", 0.9, "scripted"), None
@@ -175,8 +179,10 @@ class TestMaxNewPositionsPerCycle:
             "BBB": Quote("BBB", 300.0, buy_signal_history(300.0), "yahoo"),
             "CCC": Quote("CCC", 300.0, buy_signal_history(300.0), "yahoo"),
         })
+        from _tr_test_helpers import AnyKnockoutTR
+
         broker = PaperBroker(store, starting_cash=settings.budget, fee=0.1)
-        engine = Engine(settings, store, broker, market=market)
+        engine = Engine(settings, store, broker, market=market, tr_derivatives=AnyKnockoutTR())
 
         def fake_decide(quote):
             return Decision(quote.symbol, "buy", 0.9, "scripted"), None

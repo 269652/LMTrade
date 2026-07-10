@@ -113,12 +113,11 @@ research:
 benchmark:
   symbol: SPY              # "retail baseline": buy-and-hold SPY
 
-tr:                        # optional real-TR-instrument paper trading
-  use_derivatives: true    # inert without TR_PHONE/TR_PIN in the env; when
-                           # credentials are present, paper trading selects
-                           # REAL TR knockout certificates (real ISINs) and
-                           # marks them with the barrier-product model in
-                           # finance/knockouts.py instead of synthetic options
+tr:                        # required for options trading (paper AND live)
+  use_derivatives: true    # with options.enabled, ONLY real TR knockout
+                           # certificates (real ISINs) are ever traded — no
+                           # synthetic fallback. Without TR_PHONE/TR_PIN in the
+                           # env, no options positions will ever open.
   target_leverage: 5.0     # preferred KO leverage when picking an instrument
 
 sizing:                    # quantitative sizing layer (public methods, no magic)

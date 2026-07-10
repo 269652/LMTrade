@@ -128,9 +128,11 @@ class TestRankedEntrySelection:
         def fetcher(symbol, range_, interval):
             return buy_signal_history(300.0)
 
+        from _tr_test_helpers import AnyKnockoutTR
+
         market = MarketData("yahoo", lookback=60, fetcher=fetcher)
         broker = PaperBroker(store, starting_cash=settings.budget, fee=0.1)
-        engine = Engine(settings, store, broker, market=market)
+        engine = Engine(settings, store, broker, market=market, tr_derivatives=AnyKnockoutTR())
 
         confidences = {"AAA": 0.55, "BBB": 0.60, "CCC": 0.95, "DDD": 0.90}
 
@@ -147,12 +149,14 @@ class TestRankedEntrySelection:
             f"expected the strongest-confidence symbols, got {opened}"
 
     def test_never_opens_more_than_max_positions(self, settings, store):
+        from _tr_test_helpers import AnyKnockoutTR
+
         def fetcher(symbol, range_, interval):
             return buy_signal_history(300.0 + hash(symbol) % 50, 60)
 
         market = MarketData("yahoo", lookback=60, fetcher=fetcher)
         broker = PaperBroker(store, starting_cash=settings.budget, fee=0.1)
-        engine = Engine(settings, store, broker, market=market)
+        engine = Engine(settings, store, broker, market=market, tr_derivatives=AnyKnockoutTR())
         engine.run_cycle()
         assert len(store.open_options()) <= settings.loop.max_positions
 
