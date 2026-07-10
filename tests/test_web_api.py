@@ -603,6 +603,27 @@ class TestProviderWarningNotification:
         assert store.get_meta("provider_warnings") is None
         store.close()
 
+    def test_unavailable_fetcher_also_writes_a_warning(self, tmp_path, monkeypatch):
+        """The provider being unconfigured/not-on-PATH is just as much an
+        outage as a rate limit — the dashboard must surface it too, not stay
+        silent while news quietly stops updating."""
+        from lmtrade.research.news import NewsService
+
+        monkeypatch.setattr("lmtrade.models.providers.shutil.which", lambda name: None)
+        s = Settings(mode="paper", budget=10.0, universe=["AAPL"],
+                     data={"provider": "synthetic"})
+        s.research.news_provider = "claude_cli"
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+
+        svc = NewsService(store, s)   # claude_cli configured but not on PATH
+        result = svc.get("AAPL")
+
+        assert result is None
+        warnings = store.get_meta("provider_warnings")
+        assert warnings is not None
+        store.close()
+
     def test_summary_api_exposes_provider_warnings(self, tmp_path):
         """The /api/summary endpoint must include provider_warnings so the
         dashboard can render the notification banner."""

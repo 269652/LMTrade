@@ -47,6 +47,8 @@ OPTION_FEE = 0.1   # per option order (paper): smaller than TR's equity fee,
 NEWS_MAX_AGE_S = 24 * 3600   # news older than this no longer influences decisions
 ANALYSIS_RETRY_S = 15 * 60   # when analysis is missing/unusable, retry this often
                              # (not every cycle) so a provider outage doesn't hammer
+NEWS_STALE_GATE_S = 2 * 3600   # no fresh Claude research within this window ->
+                                # pause new entries (existing positions still managed)
 
 
 class _SharedResearchStore:
@@ -239,6 +241,24 @@ class Engine:
             return (self.now() - float(ts)) < float(valid_h) * 3600
         except (TypeError, ValueError):
             return False
+
+    def _news_gate_blocks_entries(self) -> bool:
+        """True when Claude is the configured news/analysis provider and it
+        has gone dark (unavailable, rate-limited, or simply hasn't produced
+        anything recently) — signaled by the absence of ANY research news
+        within NEWS_STALE_GATE_S. Existing positions are still fully managed
+        (that happens unconditionally, before this gate is even checked);
+        only NEW entries pause, resuming automatically the moment fresh news
+        lands (no separate 'unpause' action needed). Scoped to Claude
+        specifically — other/no providers are unaffected."""
+        uses_claude = (self.settings.research.news_provider == "claude_cli"
+                      or self.settings.research.analysis_provider == "claude_cli")
+        if not uses_claude:
+            return False
+        latest = self.store.recent_news(1)
+        if not latest:
+            return True
+        return (self.now() - float(latest[0]["ts"])) >= NEWS_STALE_GATE_S
 
     # ------------------------------------------------------------ research jobs
     def _run_scheduled_jobs(self) -> None:
@@ -776,6 +796,13 @@ class Engine:
             self.bus.warn(
                 f"Runway {econ.runway_hours:.1f}h < floor — exits only.",
                 source="economics")
+        elif self._news_gate_blocks_entries():
+            self.bus.warn(
+                f"No fresh research news in the last "
+                f"{NEWS_STALE_GATE_S // 3600}h — the configured Claude "
+                f"provider may be unavailable. Existing positions are still "
+                f"managed; NO NEW positions will open until news updates.",
+                source="research")
         else:
             open_count = len(self.store.open_options()) + len(self.store.positions())
             slots = self.settings.loop.max_positions - open_count

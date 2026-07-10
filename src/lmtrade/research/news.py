@@ -70,6 +70,18 @@ class NewsService:
             return cached
         fallback = cached if cached_ok else None   # never fall back to garbage
         if self.fetcher is None:
+            # claude_cli explicitly configured but the binary isn't on PATH —
+            # just as much an outage as a rate limit, and just as silent to
+            # the user without this: news quietly stops updating with no
+            # dashboard signal why. Not raised for the "no provider
+            # configured at all" case (Perplexity unset, claude_cli not
+            # selected) — that's a deliberate no-op, not a failure.
+            if self.settings.research.news_provider == "claude_cli":
+                self.store.set_meta("provider_warnings", {
+                    "msg": "claude CLI not found on PATH — news will not update.",
+                    "provider": "claude_cli",
+                    "ts": self.now(),
+                })
             return fallback
         try:
             text, cost = self.fetcher(symbol)

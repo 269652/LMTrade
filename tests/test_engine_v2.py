@@ -246,6 +246,76 @@ class TestOptionMarkPersistence:
         assert "mark_premium" in row
 
 
+class TestNewsStaleGate:
+    """When Claude is the configured news/analysis provider and it goes dark
+    (unavailable, or news simply hasn't updated in a while), the engine must
+    stop opening NEW positions — existing ones are still fully managed
+    (TP/SL/expiry/knockout) — and resume automatically the moment fresh
+    (<2h old) news is available again. No separate 'unpause' action needed."""
+
+    def _client(self):
+        from _tr_test_helpers import AnyKnockoutTR
+        return AnyKnockoutTR()
+
+    def test_blocks_new_entries_when_claude_configured_and_news_stale(self, settings, store):
+        settings.research.news_provider = "claude_cli"
+        from lmtrade.agents.fusion import Decision
+        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert store.open_options() == []
+
+    def test_allows_new_entries_when_fresh_news_exists(self, settings, store):
+        settings.research.news_provider = "claude_cli"
+        store.add_news("AAPL", "real news. SENTIMENT: bullish", "bullish", ts=time.time())
+        from lmtrade.agents.fusion import Decision
+        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert store.open_options(), "fresh news must unblock new entries"
+
+    def test_stale_news_blocked_even_if_more_than_2h_old(self, settings, store):
+        settings.research.news_provider = "claude_cli"
+        store.add_news("AAPL", "old news. SENTIMENT: bullish", "bullish",
+                       ts=time.time() - 3 * 3600)   # 3h old > 2h gate
+        from lmtrade.agents.fusion import Decision
+        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert store.open_options() == []
+
+    def test_existing_positions_still_managed_when_gated(self, settings, store):
+        settings.research.news_provider = "claude_cli"
+        settings.options.min_hold_hours = 0.0
+        # Deep-OTM short-expiry call: force-closes near expiry regardless of gate.
+        store.open_option("AAPL", "call", strike=1_000_000.0,
+                          expiry_ts=time.time() + 60.0, iv=0.2, contracts=1.0,
+                          entry_premium=1.0, genome_id=None,
+                          tp_premium=1e9, sl_premium=0.0)
+        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine.run_cycle()
+        assert store.closed_options(), "existing positions must still be managed when gated"
+
+    def test_no_gate_when_claude_not_configured(self, settings, store):
+        # Default provider isn't claude_cli — the gate must not apply, so an
+        # empty news table (no research configured at all) never blocks entries.
+        assert settings.research.news_provider != "claude_cli"
+        from lmtrade.agents.fusion import Decision
+        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert store.open_options(), "gate must not apply when Claude isn't the provider"
+
+    def test_gate_also_applies_when_only_analysis_provider_is_claude(self, settings, store):
+        settings.research.news_provider = "yahoo"   # arbitrary non-claude value
+        settings.research.analysis_provider = "claude_cli"
+        from lmtrade.agents.fusion import Decision
+        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert store.open_options() == []
+
+
 class TestSharedResearchAcrossBooks:
     """News and the compiled market analysis are process-wide research, not
     book-specific state — fetching them once must be visible to BOTH the
