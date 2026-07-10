@@ -7,6 +7,7 @@ unchanged behavior. All offline: the live pytr client is faked. Written
 before implementation per strict TDD."""
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from pathlib import Path
@@ -16,11 +17,13 @@ import pytest
 from lmtrade.agents.fusion import Decision
 from lmtrade.brokers.paper import PaperBroker
 from lmtrade.brokers.tr_derivatives import (
+    RECV_TIMEOUT_S,
     WS_MAX_SIZE,
     FakeTRDerivatives,
     PytrDerivatives,
     TRDerivativeQuote,
     _patch_ws_max_size,
+    _recv_for,
     build_tr_derivatives,
 )
 from lmtrade.config import Settings
@@ -540,6 +543,87 @@ class TestTickerPricing:
                 raise RuntimeError("no close frame received or sent")
 
         api = Boom(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [{"isin": "DE000KO1", "optionType": "long",
+                                     "strike": 170.0, "barrier": 170.0,
+                                     "size": 10.0, "leverage": 5.0}],
+                "vanillaWarrant": [],
+            })
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.find_knockout("AAPL", "buy", 175.0, 5.0) is None
+        assert client._api is None   # session dropped so the next attempt re-resumes
+
+
+class TestRecvForTimeout:
+    """Live incident: ticker(isin) on some instruments never produced a
+    single frame — the old _recv_for's bare `await api.recv()` blocked
+    forever. Since every caller reaches _recv_for through a synchronous
+    run_until_complete() call in the main engine thread, that one dead
+    subscription froze the entire engine cycle (or a diagnostic script), not
+    just that one lookup. Every frame wait must now be bounded."""
+
+    def test_raises_timeout_error_promptly_when_no_frame_ever_arrives(self):
+        class HangingApi:
+            async def recv(self):
+                await asyncio.sleep(10)   # far longer than the test's timeout_s
+                raise AssertionError("should never get here")
+
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            asyncio.get_event_loop().run_until_complete(
+                _recv_for(HangingApi(), "sub-1", timeout_s=0.05))
+        assert time.monotonic() - start < 2.0   # bounded, not the 10s sleep
+
+    def test_still_returns_the_matching_payload_when_it_arrives_in_time(self):
+        class PromptApi:
+            async def recv(self):
+                return ("sub-1", {}, {"ask": {"price": 4.2}})
+
+        payload = asyncio.get_event_loop().run_until_complete(
+            _recv_for(PromptApi(), "sub-1", timeout_s=1.0))
+        assert payload == {"ask": {"price": 4.2}}
+
+    def test_still_skips_frames_for_other_subscriptions_before_timing_out(self):
+        frames = iter([("sub-other", {}, {"noise": True})])
+
+        class MixedApi:
+            async def recv(self):
+                try:
+                    return next(frames)
+                except StopIteration:
+                    await asyncio.sleep(10)
+                    raise AssertionError("should never get here")
+
+        with pytest.raises(TimeoutError):
+            asyncio.get_event_loop().run_until_complete(
+                _recv_for(MixedApi(), "sub-mine", timeout_s=0.05))
+
+
+class TestTickerTimeoutDegradesGracefully:
+    """find_knockout()'s ticker fetch must degrade the same way on a timeout
+    as on any other transport error (test_ticker_fetch_error_returns_none_
+    and_drops_session above) — return None and drop the session so the next
+    cycle re-resumes, rather than propagating a raw TimeoutError."""
+
+    def test_ticker_timeout_returns_none_and_drops_session(self, monkeypatch):
+        import lmtrade.brokers.tr_derivatives as tr_derivatives
+
+        class HangingTickerApi(FakeAsyncTRApi):
+            async def recv(self):
+                if self.calls[-1][0] == "ticker":
+                    await asyncio.sleep(10)
+                    raise AssertionError("should never get here")
+                return await super().recv()
+
+        original_recv_for = tr_derivatives._recv_for
+
+        async def _fast_recv_for(api, sub_id, max_frames=10, timeout_s=0.05):
+            return await original_recv_for(api, sub_id, max_frames, timeout_s)
+
+        monkeypatch.setattr(tr_derivatives, "_recv_for", _fast_recv_for)
+
+        api = HangingTickerApi(
             search_results=[{"isin": "US0378331005"}],
             derivative_results_by_category={
                 "knockOutProduct": [{"isin": "DE000KO1", "optionType": "long",

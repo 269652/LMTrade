@@ -78,13 +78,32 @@ def drop_shared_api(phone: str) -> None:
     _SHARED_APIS.pop(phone, None)
 
 
-async def _recv_for(api: Any, sub_id: Any, max_frames: int = 10) -> Any:
+# Live incident: ticker(isin) on some instruments never produced a single
+# frame — api.recv() just sat there. Since every caller reaches _recv_for via
+# asyncio.get_event_loop().run_until_complete() (a synchronous, BLOCKING
+# call), an unbounded recv() doesn't just fail that one lookup — it freezes
+# the entire engine cycle (or a diagnostic script) forever. Every frame wait
+# is now bounded.
+RECV_TIMEOUT_S = 15.0
+
+
+async def _recv_for(api: Any, sub_id: Any, max_frames: int = 10,
+                    timeout_s: float = RECV_TIMEOUT_S) -> Any:
     """Receive until the frame for OUR subscription arrives. With the shared
     websocket, recv() can hand back another consumer's frame first — matching
     on subscription id prevents e.g. an order path consuming a ticker frame
-    (or vice versa) and misreading it as its own response."""
+    (or vice versa) and misreading it as its own response. Each individual
+    frame wait is bounded by timeout_s (TR does not always answer every
+    subscription type)."""
+    import asyncio
+
     for _ in range(max_frames):
-        rid, _, payload = await api.recv()
+        try:
+            rid, _, payload = await asyncio.wait_for(api.recv(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"no frame received within {timeout_s:g}s waiting for "
+                f"subscription {sub_id}") from None
         if str(rid) == str(sub_id):
             return payload
     raise RuntimeError(f"no response for subscription {sub_id} "
