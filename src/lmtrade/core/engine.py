@@ -133,8 +133,11 @@ class Engine:
         """Store the current mark + unrealized P&L for each open option so the
         dashboard can show live profit/loss (it's read-only over the Store and
         has no market feed of its own). Keyed by option id as a string."""
+        self._persist_option_marks_for(self.store, prices)
+
+    def _persist_option_marks_for(self, store: Store, prices: dict[str, float]) -> None:
         marks: dict[str, dict] = {}
-        for o in self.store.open_options():
+        for o in store.open_options():
             spot = prices.get(o["underlying"])
             # Fall back to last-known price if no fresh quote this cycle
             if spot is None:
@@ -150,7 +153,23 @@ class Engine:
                 "unrealized_pnl": round(value - cost, 4),
                 "spot": round(spot, 4),
             }
-        self.store.set_meta("open_option_marks", marks)
+        store.set_meta("open_option_marks", marks)
+
+    def _value_fallback_book(self, prices: dict[str, float], tr_cash: float | None) -> None:
+        """Keep the INACTIVE book (paper<->live) valued too, using this
+        cycle's already-fetched prices — no extra API calls. The dashboard's
+        live view must always show accurate cash/net worth even while the
+        engine is trading the OTHER book (e.g. live view before arming: the
+        engine simulates on paper, but real TR positions synced into the live
+        book still need fresh marks to price correctly)."""
+        fb = self.fallback_store
+        if fb is None:
+            return
+        self._persist_option_marks_for(fb, prices)
+        if tr_cash is not None:
+            fb.set_meta("tr_account_cash", tr_cash)
+            if fb.get_meta("tr_baseline_net_worth") is None:
+                fb.set_meta("tr_baseline_net_worth", tr_cash)
 
     def _get_analysis_with_fallback(self) -> dict | None:
         """Get daily market analysis from store, falling back to paper store if live analysis
@@ -675,6 +694,7 @@ class Engine:
         # minutes rather than every cycle — each fetch opens a websocket, so
         # doing it per-cycle hammers TR (and multiplies any 401). None-safe:
         # no-op without a real authenticated TR client.
+        tr_cash = None
         if self.tr_derivatives is not None and self.scheduler.due("tr_cash", 300):
             tr_cash = self.tr_derivatives.account_cash()
             if tr_cash is not None:
@@ -685,6 +705,11 @@ class Engine:
                 # paper starting budget.
                 if self.store.get_meta("tr_baseline_net_worth") is None:
                     self.store.set_meta("tr_baseline_net_worth", tr_cash)
+        # Keep the OTHER book valued too — the dashboard's live view must
+        # always show accurate cash/net worth even while this engine is
+        # actively trading the other book (e.g. unarmed live: paper trades,
+        # but real TR positions synced into the live book still need marks).
+        self._value_fallback_book(prices, tr_cash)
         econ = self.accountant.snapshot(cash, total_value, self.store.reserve_balance())
         self.store.set_meta("economics", econ.as_dict())
         self._update_realized_mark(econ.net_worth_eur)

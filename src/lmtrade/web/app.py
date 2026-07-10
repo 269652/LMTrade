@@ -86,12 +86,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _books["live"] if mode == "live" else _books["paper"]
 
     def store() -> Store:
-        c = control()
-        # When in live view but NOT armed, show paper store (engine writes there).
-        # Only when genuinely armed for live should we show the live store.
-        if c.mode == "live" and not c.armed:
-            return _books["paper"]
-        return store_for(c.mode)
+        # The live tab always shows the REAL account (live book), regardless
+        # of the arm guard — arming only gates whether NEW orders are placed
+        # for real, it must not change what the dashboard displays. The live
+        # book stays current even while unarmed (the engine trades paper
+        # meanwhile) because sync_tr_portfolio imports real TR positions into
+        # it and the engine cross-values the inactive book every cycle
+        # (Engine._value_fallback_book) using shared price data.
+        return store_for(control().mode)
 
     if STATIC.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
@@ -114,9 +116,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return html.replace("/static/app.js", f"/static/app.js?v={_asset_version()}")
 
     def _tr_meta(key: str):
-        """TR account meta (cash/baseline), read from the live book first,
-        falling back to the paper book — the engine writes it into whichever
-        book it's currently trading (unarmed live trades the paper book)."""
+        """TR account meta (cash/baseline). The engine mirrors this into BOTH
+        books every cycle (Engine._value_fallback_book), so the live book
+        normally has it directly; the paper-book fallback is defensive only
+        (e.g. a brand new live book before the engine's first cycle)."""
         v = store_for("live").get_meta(key)
         return v if v is not None else store_for("paper").get_meta(key)
 

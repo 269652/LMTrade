@@ -264,20 +264,40 @@ class TestControlPlane:
         assert cclient.get("/api/control").json()["mode"] == "paper"
 
     def test_switch_mode_changes_the_book_view(self, cclient):
-        # Paper mode: the paper book.
         assert cclient.get("/api/summary").json()["starting_cash"] == 100.0
-        # Unarmed live: the engine still simulates on the paper book, so the
-        # view deliberately stays on paper (an empty live book would show a
-        # blank dashboard); real TR balances are overlaid separately.
         cclient.post("/api/control/mode", json={"mode": "live"})
-        assert cclient.get("/api/summary").json()["starting_cash"] == 100.0
-        # ARMING live (net worth 500 > threshold) switches the view to the
-        # live book, which the armed engine trades for real.
-        cclient.post("/api/control/arm", json={"confirm": True})
+        # The live tab always shows the real account, regardless of arming —
+        # arming only gates whether NEW orders are placed for real, it must
+        # not hide the real account balance from the view.
         assert cclient.get("/api/summary").json()["starting_cash"] == 999.0
 
     def test_invalid_mode_rejected(self, cclient):
         assert cclient.post("/api/control/mode", json={"mode": "x"}).status_code == 400
+
+    def test_live_view_never_mixes_real_cash_with_paper_positions(self, tmp_path):
+        # Regression: is_live (mode-only) previously diverged from store()'s
+        # routing (mode AND armed), so an UNARMED live view showed real TR
+        # cash paired with the PAPER book's simulated positions/marks — a
+        # nonsensical mix. Real cash must always pair with the SAME book's
+        # real positions.
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                    data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        paper = Store(s.db_path)
+        paper.open_option("AAPL", "call", strike=1.0, expiry_ts=4e12, iv=0.2,
+                          contracts=999.0, entry_premium=1.0, genome_id=None,
+                          tp_premium=2.0, sl_premium=0.5)   # obviously-fake paper position
+        paper.close()
+        live = Store(s.live_db_path)
+        live.set_meta("tr_account_cash", 250.0)
+        live.close()
+
+        c = TestClient(create_app(s))
+        c.post("/api/control/mode", json={"mode": "live"})   # NOT armed
+        body = c.get("/api/summary").json()
+        assert body["cash"] == pytest.approx(250.0)          # real TR cash
+        assert body["num_positions"] == 0                    # NOT the paper phantom
+        assert body["equity"] == pytest.approx(250.0)         # no phantom value mixed in
 
     def test_cannot_arm_in_paper(self, cclient):
         r = cclient.post("/api/control/arm", json={"confirm": True}).json()

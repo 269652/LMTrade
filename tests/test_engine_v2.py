@@ -246,6 +246,74 @@ class TestOptionMarkPersistence:
         assert "mark_premium" in row
 
 
+class TestCrossBookValuation:
+    """The live dashboard view must ALWAYS show real TR cash and an accurate
+    net worth (real cash + real position value) — even while UNARMED, when
+    the trading engine is actively running against the PAPER book (armed
+    live execution is a separate guard from which book the dashboard shows).
+    Real live positions are synced in via tr_sync; this engine must keep
+    marking them fresh every cycle using the SAME already-fetched prices,
+    regardless of which book it is currently trading."""
+
+    def test_fallback_book_marks_refreshed_using_this_cycles_prices(self, settings, store):
+        from lmtrade.core.state import Store
+
+        fallback = Store(store.db_path.parent / "fallback.db")
+        fallback.open_option("AAPL", "ko_call", strike=80.0, expiry_ts=4e12, iv=0.0,
+                             contracts=5.0, entry_premium=2.0, genome_id=None,
+                             tp_premium=3.0, sl_premium=1.0,
+                             instrument_type="knockout", barrier=80.0, ratio=10.0,
+                             isin="DE000REAL01")
+        opt_id = fallback.open_options()[0]["id"]
+
+        from _tr_test_helpers import AnyKnockoutTR
+        broker = PaperBroker(store, starting_cash=settings.budget, fee=0.1)
+        engine = Engine(settings, store, broker, fallback_store=fallback,
+                        tr_derivatives=AnyKnockoutTR())
+        engine.run_cycle()
+
+        marks = fallback.get_meta("open_option_marks", {})
+        assert str(opt_id) in marks, "fallback (live) book's position must be marked too"
+        assert "unrealized_pnl" in marks[str(opt_id)]
+        fallback.close()
+
+    def test_tr_account_cash_mirrored_into_fallback_book(self, settings, store):
+        from lmtrade.core.state import Store
+
+        fallback = Store(store.db_path.parent / "fallback.db")
+
+        class CashClient:
+            def available(self):
+                return True
+
+            def account_cash(self):
+                return 555.0
+
+            def portfolio(self):
+                return None
+
+            def search(self, *a, **k):
+                return []
+
+            def find_knockout(self, *a, **k):
+                return None
+
+        broker = PaperBroker(store, starting_cash=settings.budget, fee=0.1)
+        engine = Engine(settings, store, broker, fallback_store=fallback,
+                        tr_derivatives=CashClient())
+        engine.run_cycle()
+
+        assert fallback.get_meta("tr_account_cash") == pytest.approx(555.0)
+        fallback.close()
+
+    def test_no_fallback_store_does_not_crash(self, settings, store):
+        # fallback_store is optional (e.g. some construction paths omit it);
+        # cross-book marking must be a no-op, not a crash.
+        engine = make_engine(settings, store)
+        engine.fallback_store = None
+        engine.run_cycle()   # must not raise
+
+
 class TestRealizedNetWorthMark:
     """last_realized_net_worth is a realized high-water mark: net worth locked
     in at the most recent closed trade, reset on each close."""
