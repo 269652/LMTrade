@@ -508,26 +508,35 @@ class PytrDerivatives(TRDerivativesBase):
         log.debug("TR ticker(%s, %s) -> %r", isin, exchange, payload)
         return payload
 
+    async def _fetch_price_for_order(self, api: Any, isin: str, order_type: str,
+                                     exchange: str = "LSX") -> Any:
+        sub_id = await api.price_for_order(isin, exchange, order_type)
+        payload = await _recv_for(api, sub_id)
+        await api.unsubscribe(sub_id)
+        log.debug("TR priceForOrder(%s, %s, %s) -> %r", isin, exchange, order_type, payload)
+        return payload
+
     @staticmethod
     def _parse_ticker_price(payload: Any) -> float | None:
-        """The tradeable ask price for a ticker(isin) payload. UNVERIFIED
-        against a live account (unlike the search-result field mapping,
-        which is now confirmed) — tries the most plausible shapes for an
-        executable buy price in order (nested {"ask": {"price": ...}},
-        flat {"ask": ...}, then last/mid as a fallback), and returns None
-        rather than guessing further on a shape none of these match. The
-        caller logs the raw payload on None so the real shape can be
-        corrected here quickly."""
+        """The tradeable price out of a ticker(isin) or priceForOrder payload.
+        UNVERIFIED against a live account (unlike the search-result field
+        mapping, which is now confirmed) — tries the most plausible shapes
+        for an executable buy price in order (nested {"ask": {"price": ...}}
+        / {"price": {"price": ...}}, flat {"ask": ...} / {"price": ...},
+        then last/bid as a fallback), and returns None rather than guessing
+        further on a shape none of these match. The caller logs the raw
+        payload on None so the real shape can be corrected here quickly."""
         if not isinstance(payload, dict):
             return None
-        for outer, inner in (("ask", "price"), ("last", "price"), ("bid", "price")):
+        for outer, inner in (("price", "price"), ("ask", "price"),
+                             ("last", "price"), ("bid", "price")):
             node = payload.get(outer)
             if isinstance(node, dict):
                 try:
                     return float(node[inner])
                 except (KeyError, TypeError, ValueError):
                     continue
-        for key in ("ask", "last", "price", "bid"):
+        for key in ("price", "ask", "last", "bid"):
             val = payload.get(key)
             if isinstance(val, (int, float)):
                 return float(val)
@@ -538,30 +547,48 @@ class PytrDerivatives(TRDerivativesBase):
         """Metadata-based selection (base class), THEN a live price fetch for
         the ONE winning candidate — search results run into the thousands
         per symbol, so pricing is deliberately deferred until a single
-        instrument has already been chosen, not attempted per-candidate."""
+        instrument has already been chosen, not attempted per-candidate.
+
+        Live incident: ticker(isin) — a passive streaming quote — produced
+        ZERO frames (not even an error) for a real instrument on a real
+        account; TR's own app doesn't rely on that topic to price an order.
+        priceForOrder is TR's purpose-built pre-order pricing subscription
+        and is tried FIRST; ticker() is kept only as a fallback for when
+        priceForOrder itself doesn't answer."""
         candidate = super().find_knockout(underlying, direction, spot, target_leverage)
         if candidate is None:
             return None
         api = self._login()
         if api is None:
             return None
-        try:
-            import asyncio
+        import asyncio
 
+        order_type = "sell" if direction == "sell" else "buy"
+        price: float | None = None
+        payload: Any = None
+        try:
             payload = asyncio.get_event_loop().run_until_complete(
-                self._fetch_ticker(api, candidate.isin))
+                self._fetch_price_for_order(api, candidate.isin, order_type))
+            price = self._parse_ticker_price(payload)
         except Exception as exc:  # noqa: BLE001
-            log.warning("TR ticker fetch failed for %s (%s) — dropping session, "
-                        "will re-login.", candidate.isin, exc)
-            self._invalidate()
-            return None
-        price = self._parse_ticker_price(payload)
+            log.debug("TR priceForOrder fetch failed for %s (%s) — falling "
+                     "back to ticker().", candidate.isin, exc)
+        if price is None or price <= 0:
+            try:
+                payload = asyncio.get_event_loop().run_until_complete(
+                    self._fetch_ticker(api, candidate.isin))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("TR ticker fetch failed for %s (%s) — dropping "
+                            "session, will re-login.", candidate.isin, exc)
+                self._invalidate()
+                return None
+            price = self._parse_ticker_price(payload)
         if price is None:
             log.warning(
-                "TR ticker(%s) returned an unrecognized payload shape — no "
-                "price extracted. Raw payload: %r. The mapping in "
-                "PytrDerivatives._parse_ticker_price needs updating for "
-                "your account.", candidate.isin, payload)
+                "TR priceForOrder/ticker(%s) returned an unrecognized "
+                "payload shape — no price extracted. Raw payload: %r. The "
+                "mapping in PytrDerivatives._parse_ticker_price needs "
+                "updating for your account.", candidate.isin, payload)
             return None
         if price <= 0:
             return None

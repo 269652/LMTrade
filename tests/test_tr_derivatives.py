@@ -88,7 +88,8 @@ class FakeAsyncTRApi:
 
     def __init__(self, resume_ok=True, search_results=None, derivative_results=None,
                  derivative_results_by_category=None, cash_payload=None,
-                 ticker_payload=None, ticker_by_isin=None):
+                 ticker_payload=None, ticker_by_isin=None,
+                 price_for_order_payload=None, price_for_order_by_isin=None):
         self.resume_ok = resume_ok
         self._search_results = (
             search_results if search_results is not None else [{"isin": "US0378331005"}])
@@ -108,6 +109,12 @@ class FakeAsyncTRApi:
         self._ticker_payload = (
             ticker_payload if ticker_payload is not None else {"ask": {"price": 2.5}})
         self._ticker_by_isin = ticker_by_isin or {}
+        # price_for_order(isin, exchange, order_type): TR's OWN pre-order
+        # pricing topic — unconfigured by default (raises, so callers fall
+        # back to ticker()) so every pre-existing test, which only ever
+        # configured ticker_payload, keeps passing unmodified.
+        self._price_for_order_payload = price_for_order_payload
+        self._price_for_order_by_isin = price_for_order_by_isin or {}
         self.calls: list[tuple] = []
 
     def resume_websession(self) -> bool:
@@ -129,6 +136,12 @@ class FakeAsyncTRApi:
         self.calls.append(("ticker", isin, exchange))
         return f"sub-ticker-{isin}"
 
+    async def price_for_order(self, isin, exchange, order_type):
+        if self._price_for_order_payload is None and isin not in self._price_for_order_by_isin:
+            raise NotImplementedError("price_for_order not configured on this fake")
+        self.calls.append(("price_for_order", isin, exchange, order_type))
+        return f"sub-pfo-{isin}"
+
     async def recv(self):
         last = self.calls[-1]
         kind = last[0]
@@ -140,6 +153,10 @@ class FakeAsyncTRApi:
             isin = last[1]
             payload = self._ticker_by_isin.get(isin, self._ticker_payload)
             return (f"sub-ticker-{isin}", {}, payload)
+        if kind == "price_for_order":
+            isin = last[1]
+            payload = self._price_for_order_by_isin.get(isin, self._price_for_order_payload)
+            return (f"sub-pfo-{isin}", {}, payload)
         category = last[2]
         if self._derivative_results_by_category:
             results = self._derivative_results_by_category.get(category, [])
@@ -553,6 +570,120 @@ class TestTickerPricing:
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
         assert client.find_knockout("AAPL", "buy", 175.0, 5.0) is None
         assert client._api is None   # session dropped so the next attempt re-resumes
+
+
+class TestPriceForOrderPricing:
+    """Live incident: ticker(isin) produced ZERO frames (not even an error)
+    for a real instrument on a real account — TR's own app doesn't rely on
+    that passive streaming topic to show you what an order will cost;
+    it uses priceForOrder, TR's purpose-built pre-order pricing subscription
+    (pytr's TradeRepublicApi.price_for_order). That's now the PRIMARY price
+    source; ticker() is kept only as a fallback for accounts/situations
+    where priceForOrder itself doesn't answer."""
+
+    def _one_candidate_api(self, **kwargs):
+        return FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [{"isin": "DE000KO1", "optionType": "long",
+                                     "strike": 170.0, "barrier": 170.0,
+                                     "size": 10.0, "leverage": 5.0}],
+                "vanillaWarrant": [],
+            },
+            **kwargs)
+
+    def test_price_for_order_tried_before_ticker_and_used_when_it_answers(self):
+        api = self._one_candidate_api(price_for_order_payload={"price": 6.4})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        best = client.find_knockout("AAPL", "buy", 175.0, 5.0)
+        assert best.price == pytest.approx(6.4)
+        assert not any(c[0] == "ticker" for c in api.calls)   # never needed
+
+    def test_price_for_order_uses_the_direction_as_order_type(self):
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [{"isin": "DE000KO2", "optionType": "short",
+                                     "strike": 170.0, "barrier": 170.0,
+                                     "size": 10.0, "leverage": 5.0}],
+                "vanillaWarrant": [],
+            },
+            price_for_order_payload={"price": 6.4})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        client.find_knockout("AAPL", direction="sell", spot=175.0, target_leverage=5.0)
+        pfo_calls = [c for c in api.calls if c[0] == "price_for_order"]
+        assert pfo_calls == [("price_for_order", "DE000KO2", "LSX", "sell")]
+
+    def test_nested_price_shape(self):
+        api = self._one_candidate_api(price_for_order_payload={"price": {"price": 7.1}})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        best = client.find_knockout("AAPL", "buy", 175.0, 5.0)
+        assert best.price == pytest.approx(7.1)
+
+    def test_falls_back_to_ticker_when_price_for_order_unconfigured(self):
+        # This fake's default (no price_for_order_payload given) raises
+        # NotImplementedError, mirroring a real account that doesn't answer
+        # priceForOrder — must still price the instrument via ticker().
+        api = self._one_candidate_api(ticker_payload={"ask": {"price": 3.9}})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        best = client.find_knockout("AAPL", "buy", 175.0, 5.0)
+        assert best.price == pytest.approx(3.9)
+        assert any(c[0] == "ticker" for c in api.calls)
+
+    def test_falls_back_to_ticker_when_price_for_order_times_out(self):
+        class HangingPfoApi(FakeAsyncTRApi):
+            async def price_for_order(self, isin, exchange, order_type):
+                self.calls.append(("price_for_order", isin, exchange, order_type))
+                return f"sub-pfo-{isin}"
+
+            async def recv(self):
+                if self.calls[-1][0] == "price_for_order":
+                    raise TimeoutError("no frame received within 15s "
+                                       "waiting for subscription sub-pfo")
+                return await super().recv()
+
+        api = HangingPfoApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [{"isin": "DE000KO1", "optionType": "long",
+                                     "strike": 170.0, "barrier": 170.0,
+                                     "size": 10.0, "leverage": 5.0}],
+                "vanillaWarrant": [],
+            },
+            ticker_payload={"ask": {"price": 2.2}})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        best = client.find_knockout("AAPL", "buy", 175.0, 5.0)
+        assert best.price == pytest.approx(2.2)
+
+    def test_both_price_for_order_and_ticker_fail_returns_none_and_drops_session(self):
+        class BothBoom(FakeAsyncTRApi):
+            async def ticker(self, isin, exchange="LSX"):
+                raise RuntimeError("no close frame received or sent")
+
+        api = BothBoom(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [{"isin": "DE000KO1", "optionType": "long",
+                                     "strike": 170.0, "barrier": 170.0,
+                                     "size": 10.0, "leverage": 5.0}],
+                "vanillaWarrant": [],
+            })   # price_for_order left unconfigured -> raises too
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.find_knockout("AAPL", "buy", 175.0, 5.0) is None
+        assert client._api is None   # session dropped so the next attempt re-resumes
+
+    def test_unrecognized_shape_from_both_returns_none(self, caplog):
+        import logging
+
+        api = self._one_candidate_api(
+            price_for_order_payload={"totally": "unrecognized"},
+            ticker_payload={"also": "unrecognized"})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        with caplog.at_level(logging.WARNING, logger="lmtrade.tr"):
+            result = client.find_knockout("AAPL", "buy", 175.0, 5.0)
+        assert result is None
+        blob = " ".join(r.message for r in caplog.records)
+        assert "unrecognized" in blob   # raw payload dumped for correction
 
 
 class TestRecvForTimeout:

@@ -334,11 +334,39 @@ def main() -> int:
         _info("Skipping derivative search — no ISIN resolved above.")
 
     if priced_candidate:
-        _section(f"Live ticker price ({priced_candidate.isin})")
+        _section(f"Live pricing ({priced_candidate.isin})")
         _info("Search results carry NO price at all (confirmed against a live "
               "account) — the bot fetches it separately, per selected "
-              "instrument, via ticker(isin). This payload's SHAPE is "
+              "instrument. priceForOrder (TR's own pre-order pricing "
+              "subscription) is now tried FIRST — a live incident showed "
+              "ticker(isin) can produce ZERO frames (not even an error) for "
+              "some instruments. ticker() is queried too, as the fallback "
+              "the bot itself falls back to. Both payload SHAPES are "
               "unverified; the parser tries several plausible shapes.")
+
+        _section(f"priceForOrder({priced_candidate.isin}, 'LSX', 'buy')")
+        ok, result = loop.run_until_complete(
+            _query(api, api.price_for_order(priced_candidate.isin, "LSX", "buy"), _recv_for))
+        if ok:
+            _ok("priceForOrder subscription answered")
+            _dump("raw payload", result)
+            price = PytrDerivatives._parse_ticker_price(result)
+            if price is not None:
+                _ok(f"parser extracts price={price}")
+            else:
+                _fail("parser could not extract a price from this payload — "
+                      "update PytrDerivatives._parse_ticker_price to match "
+                      "the shape dumped above.")
+        else:
+            blob = f"{getattr(result, 'error', '')} {result}"
+            if "BAD_SUBSCRIPTION_TYPE" in blob or "Unknown topic type" in blob:
+                _fail("'priceForOrder' topic rejected by this account")
+            elif isinstance(result, TimeoutError):
+                _fail(f"priceForOrder timed out: {result}")
+            else:
+                _fail(f"priceForOrder fetch failed: {result!r}")
+
+        _section(f"ticker({priced_candidate.isin}) [fallback]")
         ok, result = loop.run_until_complete(
             _query(api, api.ticker(priced_candidate.isin), _recv_for))
         if ok:
@@ -355,6 +383,8 @@ def main() -> int:
             blob = f"{getattr(result, 'error', '')} {result}"
             if "BAD_SUBSCRIPTION_TYPE" in blob or "Unknown topic type" in blob:
                 _fail("'ticker' topic rejected by this account")
+            elif isinstance(result, TimeoutError):
+                _fail(f"ticker timed out: {result}")
             else:
                 _fail(f"ticker fetch failed: {result!r}")
     elif isin:
