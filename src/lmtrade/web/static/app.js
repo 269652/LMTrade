@@ -135,9 +135,7 @@ function paintSummary(s) {
   const banner = $("econ");
   if (econ.self_sustaining) {
     banner.className = "econ-banner econ-ok";
-    const alpha = s.alpha;
-    const alphaText = alpha != null ? (alpha >= 0 ? '+' : '') + fmt(alpha) + ' EUR' : '—';
-    banner.innerHTML = `✅ <b>Outperforming SP 500</b> — alpha ${alphaText}. Runway ${fmt(econ.runway_hours,1)}h.`;
+    banner.innerHTML = `✅ <b>Self-sustaining</b> — covering its own compute cost. Runway ${fmt(econ.runway_hours,1)}h.`;
   } else if (econ.halt_trading) {
     banner.className = "econ-banner econ-warn";
     banner.innerHTML = `⛔ <b>Runway below floor</b> (${fmt(econ.runway_hours,1)}h) — new entries halted, managing exits only.`;
@@ -169,8 +167,10 @@ function paintPositions(rows) {
   $("positions").innerHTML = rows.length
     ? rows.map(p => `<tr><td>${p.symbol}</td><td><span class="kind">${p.kind || "equity"}</span></td>`
         + `<td>${p.isin || "—"}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.avg_price)}</td>`
+        + `<td>${p.sl_premium == null ? "—" : fmt(p.sl_premium)}</td>`
+        + `<td>${p.tp_premium == null ? "—" : fmt(p.tp_premium)}</td>`
         + `<td>${p.value == null ? "—" : fmt(p.value)}</td>${pnlCell(p.unrealized_pnl)}</tr>`).join("")
-    : `<tr><td colspan="7" class="muted">No open positions.</td></tr>`;
+    : `<tr><td colspan="9" class="muted">No open positions.</td></tr>`;
 }
 
 function paintStrategies(rows) {

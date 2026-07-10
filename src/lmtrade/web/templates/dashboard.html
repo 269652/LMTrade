@@ -70,8 +70,18 @@
   .badge { cursor:pointer; user-select:none; }
   .armwrap { display:none; align-items:center; gap:8px; font-size:12px; }
   .armwrap.show { display:inline-flex; }
-  .armwrap label { display:inline-flex; align-items:center; gap:5px; cursor:pointer; color:var(--muted); }
-  .armed-flag { color:var(--red); font-weight:700; letter-spacing:.5px; display:none; }
+  .armwrap label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; color:var(--muted); }
+  .switch { position:relative; display:inline-block; width:34px; height:19px; flex:none; }
+  .switch input { position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer; }
+  .switch .slider { position:absolute; inset:0; background:var(--line); border-radius:20px;
+                     transition:background .15s; pointer-events:none; }
+  .switch .slider:before { content:""; position:absolute; height:13px; width:13px; left:3px; bottom:3px;
+                            background:var(--text); border-radius:50%; transition:transform .15s; }
+  .switch input:checked ~ .slider { background:var(--red); }
+  .switch input:checked ~ .slider:before { transform:translateX(15px); }
+  .switch input:focus-visible ~ .slider { outline:2px solid var(--blue); outline-offset:2px; }
+  .armed-flag { color:var(--red); font-weight:700; letter-spacing:.5px; display:none;
+                margin-left:auto; text-align:right; }
   .armed-flag.show { display:inline; animation:pulse 1.5s infinite; }
   .v.warn { color:var(--amber); }
   .tab { position:relative; }
@@ -121,11 +131,13 @@
   <span id="mode" class="badge paper" title="Click to switch paper / live">paper</span>
   <span id="armwrap" class="armwrap">
     <label title="Arm real Trade Republic order execution">
-      <input type="checkbox" id="arm-toggle"> arm live execution
+      <span class="switch"><input type="checkbox" id="arm-toggle"><span class="slider"></span></span>
+      arm live execution
     </label>
     <span id="guard2" class="guard2">
       <label title="Second guard: allow real orders while net worth is under the low-balance threshold">
-        <input type="checkbox" id="arm2-toggle"> allow low-balance orders
+        <span class="switch"><input type="checkbox" id="arm2-toggle"><span class="slider"></span></span>
+        allow low-balance orders
       </label>
     </span>
     <span id="armed-flag" class="armed-flag">● ARMED — REAL ORDERS</span>
@@ -186,7 +198,7 @@
   </div>
 
   <section id="tab-positions">
-    <table><thead><tr><th>Symbol</th><th>Type</th><th>ISIN</th><th>Qty</th><th>Avg Price</th><th>Value</th><th>P&amp;L</th></tr></thead>
+    <table><thead><tr><th>Symbol</th><th>Type</th><th>ISIN</th><th>Qty</th><th>Avg Price</th><th>Stop Loss</th><th>Take Profit</th><th>Value</th><th>P&amp;L</th></tr></thead>
       <tbody id="positions"></tbody></table>
   </section>
 

@@ -158,7 +158,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rows = [
             {"symbol": p.symbol, "qty": round(p.qty, 6),
              "avg_price": round(p.avg_price, 4), "kind": "equity", "isin": None,
-             "value": None, "unrealized_pnl": None}
+             "value": None, "unrealized_pnl": None,
+             "sl_premium": None, "tp_premium": None}
             for p in equity_positions
         ]
         for o in open_opts:
@@ -175,6 +176,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "isin": o.get("isin"),
                 "value": mark.get("value") if mark else None,
                 "unrealized_pnl": mark.get("unrealized_pnl") if mark else None,
+                "sl_premium": o.get("sl_premium"),
+                "tp_premium": o.get("tp_premium"),
             })
         return SafeJSONResponse({
             "mode": store().get_meta("mode", settings.mode),

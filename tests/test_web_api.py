@@ -82,6 +82,31 @@ class TestSummaryIncludesOptions:
         assert nvda["isin"] == "DE000KO1"          # real TR knockout surfaced
         assert nvda["kind"] in ("put", "knockout") or "put" in nvda["symbol"].lower()
 
+    def test_positions_list_includes_stop_loss_and_take_profit(self, options_client):
+        s = options_client.get("/api/summary").json()
+        nvda = next(p for p in s["positions"] if "NVDA" in p["symbol"])
+        assert nvda["sl_premium"] == pytest.approx(2.4)
+        assert nvda["tp_premium"] == pytest.approx(6.0)
+        aapl = next(p for p in s["positions"] if "AAPL" in p["symbol"])
+        assert aapl["sl_premium"] == pytest.approx(1.5)
+        assert aapl["tp_premium"] == pytest.approx(3.75)
+
+    def test_equity_position_has_null_stop_loss_and_take_profit(self, tmp_path):
+        # Per-position TP/SL only exists for options/knockouts; an equity row
+        # has no such field at all — must be None, not omitted or crashing.
+        from lmtrade.core.state import Position
+
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                    data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        store.upsert_position(Position("AAPL", 2.0, 100.0, 0.0))
+        store.close()
+        s2 = TestClient(create_app(s)).get("/api/summary").json()
+        row = s2["positions"][0]
+        assert row["sl_premium"] is None
+        assert row["tp_premium"] is None
+
     def test_positions_include_live_pnl_from_persisted_marks(self, tmp_path):
         s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
                      data={"provider": "synthetic"})
