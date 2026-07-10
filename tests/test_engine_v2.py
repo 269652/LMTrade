@@ -279,10 +279,28 @@ class TestNewsStaleGate:
         from _tr_test_helpers import AnyKnockoutTR
         return AnyKnockoutTR()
 
+    # news_provider/analysis_provider are set to "claude_cli" throughout this
+    # class specifically to exercise the gate — without an injected
+    # news_fetcher/analysis_caller, NewsService/DailyAnalyst would resolve a
+    # REAL ClaudeCLIProvider and spawn a real `claude` subprocess if one
+    # happens to be on PATH (as it is inside this very environment),
+    # violating this repo's offline-test rule. A no-op fetcher keeps every
+    # test here fully offline regardless of the host's PATH.
+    def _noop_news_fetcher(self, symbol):
+        # Empty text -> NewsService.get() treats it as unavailable and never
+        # calls add_news(), so it can't accidentally freshen the news table
+        # and defeat the staleness scenarios these tests are checking.
+        return "", 0.0
+
+    def _noop_analysis_caller(self, prompt):
+        return "{}", 0.0
+
     def test_blocks_new_entries_when_claude_configured_and_news_stale(self, settings, store):
         settings.research.news_provider = "claude_cli"
         from lmtrade.agents.fusion import Decision
-        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine = make_engine(settings, store, tr_derivatives=self._client(),
+                             news_fetcher=self._noop_news_fetcher,
+                             analysis_caller=self._noop_analysis_caller)
         engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
         engine.run_cycle()
         assert store.open_options() == []
@@ -291,7 +309,9 @@ class TestNewsStaleGate:
         settings.research.news_provider = "claude_cli"
         store.add_news("AAPL", "real news. SENTIMENT: bullish", "bullish", ts=time.time())
         from lmtrade.agents.fusion import Decision
-        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine = make_engine(settings, store, tr_derivatives=self._client(),
+                             news_fetcher=self._noop_news_fetcher,
+                             analysis_caller=self._noop_analysis_caller)
         engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
         engine.run_cycle()
         assert store.open_options(), "fresh news must unblock new entries"
@@ -301,7 +321,9 @@ class TestNewsStaleGate:
         store.add_news("AAPL", "old news. SENTIMENT: bullish", "bullish",
                        ts=time.time() - 3 * 3600)   # 3h old > 2h gate
         from lmtrade.agents.fusion import Decision
-        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine = make_engine(settings, store, tr_derivatives=self._client(),
+                             news_fetcher=self._noop_news_fetcher,
+                             analysis_caller=self._noop_analysis_caller)
         engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
         engine.run_cycle()
         assert store.open_options() == []
@@ -314,7 +336,9 @@ class TestNewsStaleGate:
                           expiry_ts=time.time() + 60.0, iv=0.2, contracts=1.0,
                           entry_premium=1.0, genome_id=None,
                           tp_premium=1e9, sl_premium=0.0)
-        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine = make_engine(settings, store, tr_derivatives=self._client(),
+                             news_fetcher=self._noop_news_fetcher,
+                             analysis_caller=self._noop_analysis_caller)
         engine.run_cycle()
         assert store.closed_options(), "existing positions must still be managed when gated"
 
@@ -323,7 +347,9 @@ class TestNewsStaleGate:
         # empty news table (no research configured at all) never blocks entries.
         assert settings.research.news_provider != "claude_cli"
         from lmtrade.agents.fusion import Decision
-        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine = make_engine(settings, store, tr_derivatives=self._client(),
+                             news_fetcher=self._noop_news_fetcher,
+                             analysis_caller=self._noop_analysis_caller)
         engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
         engine.run_cycle()
         assert store.open_options(), "gate must not apply when Claude isn't the provider"
@@ -332,7 +358,9 @@ class TestNewsStaleGate:
         settings.research.news_provider = "yahoo"   # arbitrary non-claude value
         settings.research.analysis_provider = "claude_cli"
         from lmtrade.agents.fusion import Decision
-        engine = make_engine(settings, store, tr_derivatives=self._client())
+        engine = make_engine(settings, store, tr_derivatives=self._client(),
+                             news_fetcher=self._noop_news_fetcher,
+                             analysis_caller=self._noop_analysis_caller)
         engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
         engine.run_cycle()
         assert store.open_options() == []

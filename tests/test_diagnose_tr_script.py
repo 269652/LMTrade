@@ -100,30 +100,30 @@ class TestFindCandidateFields:
 class TestDiagnoseDerivativeItems:
     def test_reports_wrong_field_name_as_unparsed_not_silent_zero(self, diagnose_tr, capsys):
         # The live incident: real fields under different names than
-        # 'ask'/'leverage'. Since tr_derivatives.py now requires these
+        # 'leverage'/'optionType'. Since tr_derivatives.py requires these
         # fields (no silent 0 default — see _parse_knockout_item), a wrong
-        # name correctly shows up as 0 PARSED, not '5 parsed -> 0
-        # tradeable' (which is what masked the bug in the first place: it
-        # looked like a healthy parse with an oddly-empty leverage band).
+        # name correctly shows up as 0 PARSED, not '5 parsed -> 0 in band'
+        # (which is what masked the bug in the first place: it looked like
+        # a healthy parse with an oddly-empty leverage band).
         items = [{"isin": f"DE{i}", "strike": 100.0,
-                  "leverageFactor": 5.0, "askPrice": 2.0} for i in range(5)]
+                  "leverageFactor": 5.0, "optionKind": "long"} for i in range(5)]
         diagnose_tr._diagnose_derivative_items(items, "AAPL", "_parse_knockout_item")
         out = capsys.readouterr().out
-        assert "5 raw -> 0 parsed -> 0 tradeable" in out
+        assert "5 raw -> 0 parsed -> 0 in the" in out
         assert "leverageFactor" in out   # candidate field surfaced
-        assert "askPrice" in out
 
     def test_reports_healthy_funnel_when_fields_correct(self, diagnose_tr, capsys):
-        items = [{"isin": "DE1", "strike": 100.0, "ask": 2.0, "leverage": 5.0}]
+        items = [{"isin": "DE1", "optionType": "long", "strike": 100.0,
+                  "barrier": 100.0, "size": 1.0, "leverage": 5.0}]
         diagnose_tr._diagnose_derivative_items(items, "AAPL", "_parse_knockout_item")
         out = capsys.readouterr().out
-        assert "1 raw -> 1 parsed -> 1 tradeable" in out
+        assert "1 raw -> 1 parsed -> 1 in the" in out
 
     def test_reports_unparseable_items_distinctly(self, diagnose_tr, capsys):
-        items = [{"isin": "DE1"}]   # missing strike entirely
+        items = [{"isin": "DE1"}]   # missing everything but isin
         diagnose_tr._diagnose_derivative_items(items, "AAPL", "_parse_knockout_item")
         out = capsys.readouterr().out
-        assert "1 raw -> 0 parsed -> 0 tradeable" in out
+        assert "1 raw -> 0 parsed -> 0 in the" in out
 
     def test_does_not_crash_on_malformed_items(self, diagnose_tr):
         # Must not raise despite thoroughly broken input, including a

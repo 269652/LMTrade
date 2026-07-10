@@ -1,14 +1,19 @@
-"""Optional Trade Republic derivatives catalog adapter.
+"""Trade Republic derivatives catalog adapter.
 
 When TR credentials (TR_PHONE/TR_PIN) are configured AND tr.use_derivatives
-is on, paper trading selects REAL Trade Republic knockout certificates (real
-ISINs from the issuer catalog) instead of synthetic instruments — fills are
-still simulated (paper), but on instruments that actually exist on TR, priced
-with the knockout model in finance/knockouts.py against live underlying data.
+is on, both paper and live trading select REAL Trade Republic instruments
+(real ISINs from the issuer catalog: knockout certificates/Turbos, or vanilla
+put/call warrants when no Turbo exists for a symbol — the common case) — in
+paper mode the fill is simulated, in armed-live mode a real order is placed.
+There is no synthetic-instrument fallback: without a working TR client,
+options trading simply does not open new positions (see engine.py).
 
-Without credentials the factory returns None and the engine falls back to the
-synthetic Black-Scholes options layer, exactly as before — TR login stays
-strictly optional.
+Two-stage lookup, because TR's derivative search can return thousands of
+instruments per symbol with no price attached at all: search() resolves
+metadata-only candidates (real ISIN/strike/barrier/leverage/expiry) for every
+product category, find_knockout() picks the single best leverage-fit
+candidate from that pool, and ONLY THEN fetches a live price for that one
+instrument via a separate ticker(isin) subscription.
 
 Honest operational caveats, written down so nobody is surprised later:
 - pytr is an UNOFFICIAL client of TR's private mobile API (against ToS; see
@@ -16,15 +21,17 @@ Honest operational caveats, written down so nobody is surprised later:
 - TR's API is websocket-based. Corporate/sandboxed proxies frequently do not
   pass websockets (the environment this was developed in explicitly does
   not), so the live client is written defensively: any failure at any stage
-  degrades to unavailable, never crashes the engine, and the synthetic
-  fallback takes over.
-- The derivative-search payload shape differs across pytr versions; the
-  parsing here is deliberately tolerant (missing fields -> skip instrument).
+  degrades to unavailable rather than crashing the engine.
+- The derivative-SEARCH field mapping (isin/optionType/strike/barrier/size/
+  leverage/expiry) is CONFIRMED against a live account. The ticker(isin)
+  PRICE payload shape is still a best-effort guess (see
+  PytrDerivatives._parse_ticker_price) — run scripts/diagnose_tr.py against
+  a real account to verify/correct it.
 """
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from ..config import Settings, secret
@@ -121,7 +128,13 @@ class TRDerivativeQuote:
     strike: float
     barrier: float | None   # None for vanilla warrants — no knockout barrier
     ratio: float
-    price: float         # ask per certificate
+    # Ask per certificate. TR's derivative SEARCH results (search_derivative)
+    # carry no price field at all — confirmed against a live account, not
+    # guessed. A freshly-searched quote is 0.0 here; PytrDerivatives.
+    # find_knockout() fetches the real price via a separate ticker(isin)
+    # subscription for the ONE candidate it selects (not per-candidate —
+    # search results can run into the thousands) before returning it.
+    price: float
     leverage: float
     issuer: str = ""
     expiry_ts: float | None = None   # vanilla warrants only; knockouts are open-ended
@@ -204,10 +217,17 @@ class TRDerivativesBase:
         """Best instrument = tradeable leverage closest to target, within the
         sane retail band. Candidates span every product type search() found
         (real Turbos/knockouts AND vanilla put/call warrants) — whichever
-        actually exists for this underlying and best fits the target."""
+        actually exists for this underlying and best fits the target.
+
+        No price filter here: search() results carry no price at all (see
+        TRDerivativeQuote.price) for a real PytrDerivatives client — pricing
+        happens for the ONE selected candidate, in PytrDerivatives'
+        find_knockout() override, via a separate ticker fetch. A fully fake
+        client (FakeTRDerivatives, tests) already bakes a real price into
+        every quote it hands out, so this is a no-op filter for it."""
         wanted = self._CALL_KINDS if direction == "buy" else self._PUT_KINDS
         candidates = [q for q in self.search(underlying, direction)
-                      if q.kind in wanted and q.price > 0
+                      if q.kind in wanted
                       and MIN_LEVERAGE <= q.leverage <= MAX_LEVERAGE]
         if not candidates:
             return None
@@ -335,44 +355,58 @@ class PytrDerivatives(TRDerivativesBase):
         log.debug("TR search_derivative(%s, %s) -> %r", isin, category, payload)
         return (payload or {}).get("results", [])
 
+    # optionType -> our kind label. CONFIRMED against a live account (not a
+    # guess): knockOutProduct items carry "long"/"short"; vanillaWarrant
+    # items carry "call"/"put" directly.
+    _KNOCKOUT_OPTION_TYPES = {"long": "ko_call", "short": "ko_put"}
+    _VANILLA_OPTION_TYPES = {"call", "put"}
+
     @staticmethod
-    def _parse_knockout_item(item: dict, underlying: str, direction: str) -> TRDerivativeQuote:
-        # price/leverage are REQUIRED (item["..."], no .get(..., 0) default).
-        # Live incident: a wrong field-name guess silently defaulted both to
-        # 0, so every instrument "parsed" (no KeyError) yet failed
-        # find_knockout()'s price>0/leverage-band filter — thousands of
-        # instruments logged as 'usable', zero ever tradeable, no diagnostic
-        # ever fired because nothing LOOKED broken. Requiring these fields
-        # turns a wrong guess back into a loud, correctly-counted parse
-        # failure instead of a quiet no-op.
+    def _parse_knockout_item(item: dict, underlying: str) -> TRDerivativeQuote:
+        # strike/barrier/leverage/optionType are REQUIRED (item["..."], no
+        # .get(..., 0) default). Live incident: a wrong field-name guess for
+        # ask/leverage silently defaulted both to 0, so every instrument
+        # "parsed" (no KeyError) yet failed find_knockout()'s tradeability
+        # filter — thousands logged as 'usable', zero ever tradeable, no
+        # diagnostic ever fired because nothing LOOKED broken. Requiring
+        # these fields turns a wrong guess back into a loud, correctly-
+        # counted parse failure instead of a quiet no-op.
+        kind = PytrDerivatives._KNOCKOUT_OPTION_TYPES.get(item["optionType"])
+        if kind is None:
+            raise ValueError(f"unrecognized optionType {item.get('optionType')!r}")
         return TRDerivativeQuote(
             isin=item["isin"], underlying=underlying,
-            # Every result from this query is labeled with the requested
-            # direction rather than an actual call/put field from the
-            # response (unconfirmed field name) — a pre-existing
-            # simplification, not new here.
-            kind="ko_call" if direction == "buy" else "ko_put",
+            kind=kind,
             strike=float(item["strike"]),
-            barrier=float(item.get("barrier", item["strike"])),
-            ratio=float(item.get("ratio", 1.0) or 1.0),
-            price=float(item["ask"]),
+            barrier=float(item["barrier"]),
+            # TR's search results carry no field literally named "ratio" —
+            # "size" is the closest candidate (confirmed present on every
+            # live instrument seen; UNVERIFIED as the correct interpretation
+            # of a subscription ratio — if ongoing mark-to-market P&L looks
+            # wrong, check this first). Entry cost itself doesn't depend on
+            # it: contracts = budget / price, and price comes from a real
+            # ticker fetch, not this.
+            ratio=float(item["size"]),
+            price=0.0,   # not in search results; find_knockout() prices the winner
             leverage=float(item["leverage"]),
             issuer=str(item.get("issuerDisplayName", "")))
 
     @staticmethod
-    def _parse_vanilla_item(item: dict, underlying: str, direction: str) -> TRDerivativeQuote:
-        # See _parse_knockout_item: price/leverage are required, not
-        # silently-defaulted, so a wrong field-name guess is loudly
-        # diagnosable instead of masquerading as a zero-leverage "success".
+    def _parse_vanilla_item(item: dict, underlying: str) -> TRDerivativeQuote:
+        # See _parse_knockout_item for why strike/leverage/optionType are
+        # required rather than silently defaulted.
+        kind = item["optionType"]
+        if kind not in PytrDerivatives._VANILLA_OPTION_TYPES:
+            raise ValueError(f"unrecognized optionType {item.get('optionType')!r}")
         expiry_raw = (item.get("expiry") or item.get("expiryDate")
                      or item.get("maturityDate") or item.get("maturity"))
         return TRDerivativeQuote(
             isin=item["isin"], underlying=underlying,
-            kind="call" if direction == "buy" else "put",
+            kind=kind,
             strike=float(item["strike"]),
             barrier=None,     # vanilla warrant: no knockout barrier
-            ratio=float(item.get("ratio", 1.0) or 1.0),
-            price=float(item["ask"]),
+            ratio=float(item["size"]),   # see _parse_knockout_item's ratio note
+            price=0.0,
             leverage=float(item["leverage"]),
             issuer=str(item.get("issuerDisplayName", "")),
             expiry_ts=_parse_ts(expiry_raw))
@@ -384,6 +418,9 @@ class PytrDerivatives(TRDerivativesBase):
     )
 
     def search(self, underlying: str, direction: str) -> list[TRDerivativeQuote]:
+        """Metadata-only candidates (real ISIN/strike/barrier/leverage/
+        expiry) — NO price. TR's search results carry no price field at all;
+        find_knockout() fetches one for the single candidate it selects."""
         api = self._login()
         if api is None:
             return []
@@ -408,7 +445,7 @@ class PytrDerivatives(TRDerivativesBase):
                 first_error: Exception | None = None
                 for item in items:
                     try:
-                        parsed.append(parser(item, underlying, direction))
+                        parsed.append(parser(item, underlying))
                     except (KeyError, TypeError, ValueError) as exc:
                         if first_error is None:
                             first_error = exc
@@ -444,6 +481,72 @@ class PytrDerivatives(TRDerivativesBase):
                         "will re-login.", exc)
             self._invalidate()
             return []
+
+    async def _fetch_ticker(self, api: Any, isin: str, exchange: str = "LSX") -> Any:
+        sub_id = await api.ticker(isin, exchange)
+        payload = await _recv_for(api, sub_id)
+        await api.unsubscribe(sub_id)
+        log.debug("TR ticker(%s, %s) -> %r", isin, exchange, payload)
+        return payload
+
+    @staticmethod
+    def _parse_ticker_price(payload: Any) -> float | None:
+        """The tradeable ask price for a ticker(isin) payload. UNVERIFIED
+        against a live account (unlike the search-result field mapping,
+        which is now confirmed) — tries the most plausible shapes for an
+        executable buy price in order (nested {"ask": {"price": ...}},
+        flat {"ask": ...}, then last/mid as a fallback), and returns None
+        rather than guessing further on a shape none of these match. The
+        caller logs the raw payload on None so the real shape can be
+        corrected here quickly."""
+        if not isinstance(payload, dict):
+            return None
+        for outer, inner in (("ask", "price"), ("last", "price"), ("bid", "price")):
+            node = payload.get(outer)
+            if isinstance(node, dict):
+                try:
+                    return float(node[inner])
+                except (KeyError, TypeError, ValueError):
+                    continue
+        for key in ("ask", "last", "price", "bid"):
+            val = payload.get(key)
+            if isinstance(val, (int, float)):
+                return float(val)
+        return None
+
+    def find_knockout(self, underlying: str, direction: str, spot: float,
+                      target_leverage: float) -> TRDerivativeQuote | None:
+        """Metadata-based selection (base class), THEN a live price fetch for
+        the ONE winning candidate — search results run into the thousands
+        per symbol, so pricing is deliberately deferred until a single
+        instrument has already been chosen, not attempted per-candidate."""
+        candidate = super().find_knockout(underlying, direction, spot, target_leverage)
+        if candidate is None:
+            return None
+        api = self._login()
+        if api is None:
+            return None
+        try:
+            import asyncio
+
+            payload = asyncio.get_event_loop().run_until_complete(
+                self._fetch_ticker(api, candidate.isin))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("TR ticker fetch failed for %s (%s) — dropping session, "
+                        "will re-login.", candidate.isin, exc)
+            self._invalidate()
+            return None
+        price = self._parse_ticker_price(payload)
+        if price is None:
+            log.warning(
+                "TR ticker(%s) returned an unrecognized payload shape — no "
+                "price extracted. Raw payload: %r. The mapping in "
+                "PytrDerivatives._parse_ticker_price needs updating for "
+                "your account.", candidate.isin, payload)
+            return None
+        if price <= 0:
+            return None
+        return replace(candidate, price=price)
 
     def account_cash(self) -> float | None:
         api = self._login()

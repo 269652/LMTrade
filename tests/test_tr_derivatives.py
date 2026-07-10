@@ -84,7 +84,8 @@ class FakeAsyncTRApi:
     without ever touching TR's real (websocket) API."""
 
     def __init__(self, resume_ok=True, search_results=None, derivative_results=None,
-                 derivative_results_by_category=None, cash_payload=None):
+                 derivative_results_by_category=None, cash_payload=None,
+                 ticker_payload=None, ticker_by_isin=None):
         self.resume_ok = resume_ok
         self._search_results = (
             search_results if search_results is not None else [{"isin": "US0378331005"}])
@@ -96,6 +97,14 @@ class FakeAsyncTRApi:
         self._derivative_results_by_category = derivative_results_by_category or {}
         self._cash_payload = (cash_payload if cash_payload is not None
                               else [{"currencyId": "EUR", "amount": 42.5}])
+        # ticker(isin) response: per-ISIN override, else a sane default so
+        # tests only about candidate SELECTION don't also need to care about
+        # pricing. TR's real ticker payload shape is unverified — this
+        # default matches PytrDerivatives._parse_ticker_price's primary guess
+        # (nested ask.price).
+        self._ticker_payload = (
+            ticker_payload if ticker_payload is not None else {"ask": {"price": 2.5}})
+        self._ticker_by_isin = ticker_by_isin or {}
         self.calls: list[tuple] = []
 
     def resume_websession(self) -> bool:
@@ -113,6 +122,10 @@ class FakeAsyncTRApi:
         self.calls.append(("cash",))
         return "sub-cash"
 
+    async def ticker(self, isin, exchange="LSX"):
+        self.calls.append(("ticker", isin, exchange))
+        return f"sub-ticker-{isin}"
+
     async def recv(self):
         last = self.calls[-1]
         kind = last[0]
@@ -120,6 +133,10 @@ class FakeAsyncTRApi:
             return ("sub-search", {}, {"results": self._search_results})
         if kind == "cash":
             return ("sub-cash", {}, self._cash_payload)
+        if kind == "ticker":
+            isin = last[1]
+            payload = self._ticker_by_isin.get(isin, self._ticker_payload)
+            return (f"sub-ticker-{isin}", {}, payload)
         category = last[2]
         if self._derivative_results_by_category:
             results = self._derivative_results_by_category.get(category, [])
@@ -237,8 +254,8 @@ class TestPytrSearchGlue:
         api = FakeAsyncTRApi(
             search_results=[{"isin": "US0378331005"}],
             derivative_results=[{
-                "isin": "DE000ABC123", "strike": 180.0, "barrier": 180.0,
-                "ratio": 10.0, "ask": 2.5, "leverage": 5.0,
+                "isin": "DE000ABC123", "optionType": "long", "strike": 180.0,
+                "barrier": 180.0, "size": 10.0, "leverage": 5.0,
                 "issuerDisplayName": "TestBank",
             }])
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
@@ -250,12 +267,25 @@ class TestPytrSearchGlue:
         assert ("search", "AAPL", "stock") in api.calls
         assert ("search_derivative", "US0378331005", "knockOutProduct") in api.calls
 
-    def test_sell_direction_maps_to_ko_put(self):
+    def test_option_type_short_parses_to_ko_put(self):
+        # kind is derived from the item's own optionType field (confirmed
+        # against a live account), NOT the requested search direction — TR's
+        # search results mix long and short instruments together.
         api = FakeAsyncTRApi(
-            derivative_results=[{"isin": "DE1", "strike": 100.0, "ask": 1.0, "leverage": 4.0}])
+            derivative_results=[{"isin": "DE1", "optionType": "short",
+                                 "strike": 100.0, "barrier": 100.0,
+                                 "size": 1.0, "leverage": 4.0}])
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
         quotes = client.search("AAPL", "sell")
         assert quotes[0].kind == "ko_put"
+
+    def test_unrecognized_option_type_is_skipped(self):
+        api = FakeAsyncTRApi(
+            derivative_results=[{"isin": "DE1", "optionType": "weird",
+                                 "strike": 100.0, "barrier": 100.0,
+                                 "size": 1.0, "leverage": 4.0}])
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.search("AAPL", "buy") == []
 
     def test_no_isin_match_returns_empty(self):
         api = FakeAsyncTRApi(search_results=[])
@@ -267,8 +297,9 @@ class TestPytrSearchGlue:
         api = FakeAsyncTRApi(
             search_results=[{"isin": "US0378331005"}],
             derivative_results=[
-                {"isin": "DE1"},  # missing strike -> skipped
-                {"isin": "DE2", "strike": 50.0, "ask": 1.0, "leverage": 3.0},
+                {"isin": "DE1"},  # missing strike/optionType -> skipped
+                {"isin": "DE2", "optionType": "long", "strike": 50.0,
+                 "barrier": 50.0, "size": 1.0, "leverage": 3.0},
             ])
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
         quotes = client.search("AAPL", "buy")
@@ -369,8 +400,8 @@ class TestVanillaWarrantFallback:
             search_results=[{"isin": "US0378331005"}],
             derivative_results_by_category={
                 "knockOutProduct": [],
-                "vanillaWarrant": [{"isin": "DE000WARRANT1", "strike": 180.0,
-                                    "ask": 3.0, "leverage": 6.0,
+                "vanillaWarrant": [{"isin": "DE000WARRANT1", "optionType": "call",
+                                    "strike": 180.0, "size": 0.1, "leverage": 6.0,
                                     "issuerDisplayName": "TestBank"}],
             })
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
@@ -384,10 +415,11 @@ class TestVanillaWarrantFallback:
         api = FakeAsyncTRApi(
             search_results=[{"isin": "US0378331005"}],
             derivative_results_by_category={
-                "knockOutProduct": [{"isin": "DE000KO1", "strike": 170.0, "barrier": 170.0,
-                                     "ratio": 10.0, "ask": 2.0, "leverage": 5.0}],
-                "vanillaWarrant": [{"isin": "DE000WARRANT1", "strike": 180.0,
-                                    "ask": 3.0, "leverage": 6.0}],
+                "knockOutProduct": [{"isin": "DE000KO1", "optionType": "long",
+                                     "strike": 170.0, "barrier": 170.0,
+                                     "size": 10.0, "leverage": 5.0}],
+                "vanillaWarrant": [{"isin": "DE000WARRANT1", "optionType": "call",
+                                    "strike": 180.0, "size": 0.1, "leverage": 6.0}],
             })
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
         quotes = client.search("AAPL", "buy")
@@ -396,27 +428,32 @@ class TestVanillaWarrantFallback:
     def test_find_knockout_selects_best_vanilla_candidate(self):
         # Only vanilla instruments exist; the closest-leverage-fit selection
         # must still work for them (direction-matching by kind: call/put,
-        # not just ko_call/ko_put).
+        # not just ko_call/ko_put). find_knockout() also fetches a live
+        # ticker price for the winner — the fake's default ticker payload
+        # (a valid ask.price) makes that succeed here.
         api = FakeAsyncTRApi(
             search_results=[{"isin": "US0378331005"}],
             derivative_results_by_category={
                 "knockOutProduct": [],
                 "vanillaWarrant": [
-                    {"isin": "DE000W1", "strike": 170.0, "ask": 2.0, "leverage": 3.0},
-                    {"isin": "DE000W2", "strike": 180.0, "ask": 3.0, "leverage": 6.0},
+                    {"isin": "DE000W1", "optionType": "call", "strike": 170.0,
+                     "size": 0.1, "leverage": 3.0},
+                    {"isin": "DE000W2", "optionType": "call", "strike": 180.0,
+                     "size": 0.1, "leverage": 6.0},
                 ],
             })
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
         best = client.find_knockout("AAPL", direction="buy", spot=175.0, target_leverage=6.5)
         assert best.isin == "DE000W2"        # 6.0x closer to 6.5x target than 3.0x
+        assert best.price == pytest.approx(2.5)   # fake's default ticker ask.price
 
-    def test_vanilla_sell_direction_maps_to_put(self):
+    def test_vanilla_short_option_type_maps_to_put(self):
         api = FakeAsyncTRApi(
             search_results=[{"isin": "US0378331005"}],
             derivative_results_by_category={
                 "knockOutProduct": [],
-                "vanillaWarrant": [{"isin": "DE000W1", "strike": 170.0, "ask": 2.0,
-                                    "leverage": 4.0}],
+                "vanillaWarrant": [{"isin": "DE000W1", "optionType": "put",
+                                    "strike": 170.0, "size": 0.1, "leverage": 4.0}],
             })
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
         quotes = client.search("AAPL", "sell")
@@ -428,6 +465,91 @@ class TestVanillaWarrantFallback:
             derivative_results_by_category={"knockOutProduct": [], "vanillaWarrant": []})
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
         assert client.search("AAPL", "buy") == []
+
+
+class TestTickerPricing:
+    """TR's derivative SEARCH results carry NO price at all (confirmed
+    against a live account) — search results can run into the thousands per
+    symbol, so find_knockout() prices only the ONE candidate it selects, via
+    a separate ticker(isin) subscription, rather than pricing every
+    candidate up front."""
+
+    def _one_candidate_api(self, ticker_payload=None, ticker_by_isin=None):
+        return FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [{"isin": "DE000KO1", "optionType": "long",
+                                     "strike": 170.0, "barrier": 170.0,
+                                     "size": 10.0, "leverage": 5.0}],
+                "vanillaWarrant": [],
+            },
+            ticker_payload=ticker_payload, ticker_by_isin=ticker_by_isin)
+
+    def test_ticker_fetched_only_for_the_selected_winner(self):
+        api = self._one_candidate_api()
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        client.find_knockout("AAPL", direction="buy", spot=175.0, target_leverage=5.0)
+        ticker_calls = [c for c in api.calls if c[0] == "ticker"]
+        assert ticker_calls == [("ticker", "DE000KO1", "LSX")]
+
+    def test_no_candidate_never_fetches_a_ticker(self):
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={"knockOutProduct": [], "vanillaWarrant": []})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.find_knockout("AAPL", "buy", 175.0, 5.0) is None
+        assert not any(c[0] == "ticker" for c in api.calls)
+
+    def test_nested_ask_price_shape(self):
+        api = self._one_candidate_api(ticker_payload={"ask": {"price": 4.2}})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        best = client.find_knockout("AAPL", "buy", 175.0, 5.0)
+        assert best.price == pytest.approx(4.2)
+
+    def test_flat_ask_shape(self):
+        api = self._one_candidate_api(ticker_payload={"ask": 3.7})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        best = client.find_knockout("AAPL", "buy", 175.0, 5.0)
+        assert best.price == pytest.approx(3.7)
+
+    def test_falls_back_to_last_price_when_no_ask(self):
+        api = self._one_candidate_api(ticker_payload={"last": {"price": 5.1}})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        best = client.find_knockout("AAPL", "buy", 175.0, 5.0)
+        assert best.price == pytest.approx(5.1)
+
+    def test_unrecognized_ticker_shape_returns_none(self, caplog):
+        import logging
+
+        api = self._one_candidate_api(ticker_payload={"totally": "unrecognized"})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        with caplog.at_level(logging.WARNING, logger="lmtrade.tr"):
+            result = client.find_knockout("AAPL", "buy", 175.0, 5.0)
+        assert result is None
+        blob = " ".join(r.message for r in caplog.records)
+        assert "totally" in blob   # raw payload dumped for correction
+
+    def test_zero_or_negative_price_returns_none(self):
+        api = self._one_candidate_api(ticker_payload={"ask": {"price": 0.0}})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.find_knockout("AAPL", "buy", 175.0, 5.0) is None
+
+    def test_ticker_fetch_error_returns_none_and_drops_session(self):
+        class Boom(FakeAsyncTRApi):
+            async def ticker(self, isin, exchange="LSX"):
+                raise RuntimeError("no close frame received or sent")
+
+        api = Boom(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [{"isin": "DE000KO1", "optionType": "long",
+                                     "strike": 170.0, "barrier": 170.0,
+                                     "size": 10.0, "leverage": 5.0}],
+                "vanillaWarrant": [],
+            })
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.find_knockout("AAPL", "buy", 175.0, 5.0) is None
+        assert client._api is None   # session dropped so the next attempt re-resumes
 
 
 class TestPytrSearchDiagnostics:
@@ -460,7 +582,8 @@ class TestPytrSearchDiagnostics:
         api = FakeAsyncTRApi(
             search_results=[{"isin": "US0378331005"}],
             derivative_results=[
-                {"isin": "DE1", "strike": 100.0, "ask": 2.0, "leverage": 5.0}])
+                {"isin": "DE1", "optionType": "long", "strike": 100.0,
+                 "barrier": 100.0, "size": 1.0, "leverage": 5.0}])
         client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
         with caplog.at_level(logging.INFO, logger="lmtrade.tr"):
             out = client.search("AAPL", "buy")

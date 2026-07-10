@@ -103,15 +103,18 @@ def _find_candidate_fields(item: dict) -> dict:
             if any(hint in str(k).lower() for hint in _FIELD_HINTS)}
 
 
-def _diagnose_derivative_items(items: list, symbol: str, parser_name: str) -> None:
+def _diagnose_derivative_items(items: list, symbol: str, parser_name: str) -> object | None:
     """For a sample of raw instruments: dump the full raw JSON, run the
     bot's ACTUAL parser against it (showing what it extracts or why it
-    fails), and call out fields whose NAME hints at strike/ask/leverage/
-    barrier/ratio/expiry — even under a different name than currently
+    fails), and call out fields whose NAME hints at strike/leverage/barrier/
+    ratio/expiry/optionType — even under a different name than currently
     guessed — so the real field mapping is visible without a round trip.
-    Finishes with a raw -> parsed -> tradeable funnel so a 'parses fine but
-    never tradeable' mismatch (wrong ask/leverage field, defaulting to 0) is
-    immediately obvious rather than looking like a healthy 'usable' count."""
+    Finishes with a raw -> parsed -> in-leverage-band funnel so a silently-
+    wrong field mapping is immediately obvious. Search results carry NO
+    price (confirmed against a live account) — pricing is a separate step,
+    see the ticker diagnostic this return value feeds. Returns the first
+    successfully-parsed, in-band TRDerivativeQuote (for the ticker probe),
+    or None."""
     from lmtrade.brokers.tr_derivatives import PytrDerivatives
     from lmtrade.finance.knockouts import MAX_LEVERAGE, MIN_LEVERAGE
 
@@ -125,41 +128,44 @@ def _diagnose_derivative_items(items: list, symbol: str, parser_name: str) -> No
             continue
         candidates = _find_candidate_fields(item)
         if candidates:
-            _dump("fields whose NAME hints strike/ask/leverage/barrier/ratio/"
-                  "expiry (compare against tr_derivatives.py's parsing even "
-                  "if the name differs from what's currently guessed)",
-                  candidates)
+            _dump("fields whose NAME hints strike/leverage/barrier/ratio/"
+                  "expiry/optionType (compare against tr_derivatives.py's "
+                  "parsing even if the name differs from what's currently "
+                  "guessed)", candidates)
         try:
-            q = parser(item, symbol, "buy")
-            _ok(f"parser extracts: price={q.price} leverage={q.leverage} "
-                f"strike={q.strike} barrier={q.barrier}")
+            q = parser(item, symbol)
+            _ok(f"parser extracts: kind={q.kind} leverage={q.leverage} "
+                f"strike={q.strike} barrier={q.barrier} ratio={q.ratio}")
         except (KeyError, TypeError, ValueError) as exc:
             _fail(f"parser failed on this item: {exc!r} — a required field "
                   "is missing or under a different name (see candidates above).")
 
-    parsed_ok = tradeable = 0
+    parsed_ok = in_band = 0
+    first_tradeable = None
     for item in items:
         if not isinstance(item, dict):
             continue
         try:
-            q = parser(item, symbol, "buy")
+            q = parser(item, symbol)
         except (KeyError, TypeError, ValueError):
             continue
         parsed_ok += 1
-        if q.price > 0 and MIN_LEVERAGE <= q.leverage <= MAX_LEVERAGE:
-            tradeable += 1
-    funnel = (f"{len(items)} raw -> {parsed_ok} parsed -> {tradeable} tradeable "
-             f"(price>0 and {MIN_LEVERAGE:g}x <= leverage <= {MAX_LEVERAGE:g}x)")
-    if tradeable > 0:
+        if MIN_LEVERAGE <= q.leverage <= MAX_LEVERAGE:
+            in_band += 1
+            if first_tradeable is None:
+                first_tradeable = q
+    funnel = (f"{len(items)} raw -> {parsed_ok} parsed -> {in_band} in the "
+             f"{MIN_LEVERAGE:g}x-{MAX_LEVERAGE:g}x leverage band")
+    if in_band > 0:
         _ok(funnel)
     elif parsed_ok > 0:
-        _fail(funnel + " — parses but NEVER passes the tradeability filter. "
-              "Compare the candidate fields dumped above against "
-              "tr_derivatives.py's _parse_knockout_item/_parse_vanilla_item "
-              "('ask' and 'leverage' are the current guesses) and fix the "
-              "mapping if the real field has a different name.")
+        _fail(funnel + " — parses but every instrument falls outside the "
+              "leverage band. Either genuinely no tradeable leverage exists "
+              "for this symbol/category right now, or 'leverage' is under "
+              "the wrong field (see candidates above).")
     else:
         _fail(funnel)
+    return first_tradeable
 
 
 def main() -> int:
@@ -257,6 +263,7 @@ def main() -> int:
     else:
         _fail(f"search failed: {result!r}")
 
+    priced_candidate = None
     if isin:
         # Every product category the bot searches — a symbol with no
         # knockout/Turbo may still have a vanilla put/call warrant, and
@@ -278,9 +285,39 @@ def main() -> int:
             if not items:
                 _dump("raw payload (empty results)", result)
                 continue
-            _diagnose_derivative_items(items, symbol, parser_name)
+            candidate = _diagnose_derivative_items(items, symbol, parser_name)
+            if priced_candidate is None:
+                priced_candidate = candidate
     else:
         _info("Skipping derivative search — no ISIN resolved above.")
+
+    if priced_candidate:
+        _section(f"Live ticker price ({priced_candidate.isin})")
+        _info("Search results carry NO price at all (confirmed against a live "
+              "account) — the bot fetches it separately, per selected "
+              "instrument, via ticker(isin). This payload's SHAPE is "
+              "unverified; the parser tries several plausible shapes.")
+        ok, result = loop.run_until_complete(
+            _query(api, api.ticker(priced_candidate.isin), _recv_for))
+        if ok:
+            _ok("ticker subscription answered")
+            _dump("raw payload", result)
+            price = PytrDerivatives._parse_ticker_price(result)
+            if price is not None:
+                _ok(f"parser extracts price={price}")
+            else:
+                _fail("parser could not extract a price from this payload — "
+                      "update PytrDerivatives._parse_ticker_price to match "
+                      "the shape dumped above.")
+        else:
+            blob = f"{getattr(result, 'error', '')} {result}"
+            if "BAD_SUBSCRIPTION_TYPE" in blob or "Unknown topic type" in blob:
+                _fail("'ticker' topic rejected by this account")
+            else:
+                _fail(f"ticker fetch failed: {result!r}")
+    elif isin:
+        _info("Skipping ticker price check — no in-leverage-band instrument "
+              "found above to price.")
 
     _section("Summary")
     print(
