@@ -16,6 +16,48 @@ def store(tmp_path: Path) -> Store:
     s.close()
 
 
+class TestClear:
+    """Store.clear() backs `lmtrade reset`. Default keeps news/analysis (they
+    are expensive to regather); a full purge is opt-in."""
+
+    def _seed(self, store: Store) -> None:
+        from lmtrade.core.state import Position, Trade
+        store.set_meta("starting_cash", 100.0)
+        store.set_meta("market_analysis", {"ts": 1.0, "symbols": {"AAPL": {}}})
+        store.add_news("AAPL", "some real news. SENTIMENT: bullish", "bullish", ts=1.0)
+        store.record_trade(Trade("AAPL", "buy", 1.0, 100.0))
+        store.upsert_position(Position("AAPL", 1.0, 100.0, 1.0))
+        store.open_option("AAPL", "ko_call", strike=80.0, expiry_ts=4e12, iv=0.0,
+                          contracts=1.0, entry_premium=2.0, genome_id=None,
+                          tp_premium=3.0, sl_premium=1.0)
+        store.add_log("info", "hello")
+        store.add_activity("trade", "did a thing")
+        store.record_cost("fee", 1.0, "options")
+
+    def test_default_clear_keeps_news_and_analysis(self, store: Store):
+        self._seed(store)
+        store.clear()
+        assert store.recent_news(10), "news must survive a default clear"
+        assert store.get_meta("market_analysis") is not None
+
+    def test_default_clear_wipes_everything_else(self, store: Store):
+        self._seed(store)
+        store.clear()
+        assert store.recent_trades(10) == []
+        assert store.positions() == []
+        assert store.open_options() == []
+        assert store.recent_logs(10) == []
+        assert store.recent_activity(10) == []
+        assert store.total_costs() == {}
+        assert store.get_meta("starting_cash") is None
+
+    def test_purge_news_clears_everything_including_news_and_analysis(self, store: Store):
+        self._seed(store)
+        store.clear(purge_news=True)
+        assert store.recent_news(10) == []
+        assert store.get_meta("market_analysis") is None
+
+
 class TestOptionPositions:
     def test_open_close_lifecycle(self, store: Store):
         oid = store.open_option("AAPL", "call", 100.0, time.time() + 7 * 86400,

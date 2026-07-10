@@ -530,14 +530,32 @@ def viz(
 
 
 @app.command()
-def reset(yes: bool = typer.Option(False, "--yes", help="Skip confirmation.")):
-    """Wipe runtime state (database) and start a fresh account."""
+def reset(
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation."),
+    purge_news: bool = typer.Option(
+        False, "--purge-news",
+        help="Also delete cached news and the compiled market analysis. "
+             "By default they survive a reset — they cost real web-search/"
+             "LLM calls to regather."),
+):
+    """Wipe runtime state — trades, positions, activity, learning — in BOTH
+    the paper and live books, and start fresh accounts. News and the
+    compiled market analysis are preserved unless --purge-news."""
     settings = load_settings()
     if not yes:
-        typer.confirm(f"Delete {settings.db_path}? This resets all history.", abort=True)
-    if settings.db_path.exists():
-        settings.db_path.unlink()
-    console.print("[green]State reset.[/green]")
+        msg = "Reset ALL paper and live trading history?"
+        if purge_news:
+            msg += " This also purges cached news and market analysis."
+        typer.confirm(msg, abort=True)
+    for book in ("paper", "live"):
+        path = settings.book_db_path(book)
+        if not path.exists():
+            continue
+        store = Store(path)
+        store.clear(purge_news=purge_news)
+        store.close()
+    console.print("[green]State reset.[/green]" + (
+        "" if purge_news else " News/analysis preserved (--purge-news to wipe them too)."))
 
 
 @app.command()

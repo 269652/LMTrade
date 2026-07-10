@@ -82,3 +82,49 @@ class TestAnalyze:
         result = runner.invoke(cli.app, ["analyze"])
         assert result.exit_code == 0
         assert "unavailable" in result.output.lower() or "no " in result.output.lower()
+
+
+class TestReset:
+    """`lmtrade reset` wipes BOTH the paper and live books. By default news
+    and the compiled market analysis survive (expensive to regather); a full
+    purge is opt-in via --purge-news."""
+
+    def _seed_both_books(self, settings: Settings) -> None:
+        for path in (settings.db_path, settings.live_db_path):
+            store = Store(path)
+            store.add_news("AAPL", "real news. SENTIMENT: bullish", "bullish", ts=1.0)
+            store.set_meta("market_analysis", {"ts": 1.0, "symbols": {}})
+            store.set_meta("starting_cash", 123.0)
+            store.close()
+
+    def test_reset_preserves_news_by_default(self, settings):
+        self._seed_both_books(settings)
+        result = runner.invoke(cli.app, ["reset", "--yes"])
+        assert result.exit_code == 0
+        for path in (settings.db_path, settings.live_db_path):
+            store = Store(path)
+            assert store.recent_news(10), f"news should survive reset: {path}"
+            assert store.get_meta("market_analysis") is not None
+            assert store.get_meta("starting_cash") is None   # everything else cleared
+            store.close()
+
+    def test_reset_purges_news_with_flag(self, settings):
+        self._seed_both_books(settings)
+        result = runner.invoke(cli.app, ["reset", "--yes", "--purge-news"])
+        assert result.exit_code == 0
+        for path in (settings.db_path, settings.live_db_path):
+            store = Store(path)
+            assert store.recent_news(10) == []
+            assert store.get_meta("market_analysis") is None
+            store.close()
+
+    def test_reset_clears_both_books_even_if_only_paper_seeded(self, settings):
+        # Only the paper book exists on disk; live must not be created or crash.
+        store = Store(settings.db_path)
+        store.set_meta("starting_cash", 9.0)
+        store.close()
+        result = runner.invoke(cli.app, ["reset", "--yes"])
+        assert result.exit_code == 0
+        store = Store(settings.db_path)
+        assert store.get_meta("starting_cash") is None
+        store.close()

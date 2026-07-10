@@ -402,6 +402,34 @@ class Store:
             ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    # Tables wiped unconditionally by clear(); news/meta are handled
+    # separately so news+analysis can be preserved by default.
+    _CLEAR_TABLES = (
+        "trades", "positions", "logs", "activity", "equity_curve",
+        "costs", "option_positions", "benchmark_curve",
+    )
+    # Meta keys preserved across a default (non-purging) clear.
+    _NEWS_META_KEYS = ("market_analysis",)
+
+    def clear(self, purge_news: bool = False) -> None:
+        """Wipe runtime state for a fresh account (`lmtrade reset`). By
+        default news and the compiled market analysis are PRESERVED — they
+        are expensive to regather (web search, LLM calls) and losing them on
+        every reset forced an unnecessary wait before the bot could trade
+        again. Pass purge_news=True to also wipe those."""
+        with self._lock:
+            for table in self._CLEAR_TABLES:
+                self._conn.execute(f"DELETE FROM {table}")
+            if purge_news:
+                self._conn.execute("DELETE FROM news")
+                self._conn.execute("DELETE FROM meta")
+            else:
+                placeholders = ",".join("?" * len(self._NEWS_META_KEYS))
+                self._conn.execute(
+                    f"DELETE FROM meta WHERE key NOT IN ({placeholders})",
+                    self._NEWS_META_KEYS)
+            self._conn.commit()
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
