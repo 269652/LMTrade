@@ -41,3 +41,31 @@ id,ts,symbol,side,qty,price,fee,mode,reason,confidence
 20,1783606258.4454129,GOOGL,buy,2.090517272457034,2.823342470193012,0.1,paper,open put K=352.91 — net=-1.00 via 4 providers; agree: strategy,1.0
 21,1783613114.3029273,AAPL,sell,11.202117885883638,4.131015603333793,0.1,paper,"close call — take-profit hit (mark 4.131 >= TP 4.017, +54%)",
 22,1783613115.7311842,TSLA,buy,3.47750101587586,3.430143613342892,0.1,paper,open call K=400.0 — net=+1.00 via 4 providers; agree: heuristic,1.0
+1,1783595296.1735303,AAPL,buy,11.202117885883638,2.678065014634825,0.1,paper,open call K=312.58 — net=+1.00 via 4 providers; agree: heuristic,1.0
+2,1783595296.2503924,MSFT,buy,6.916069533147198,3.0320689951851136,0.1,paper,open put K=379.0 — net=-1.00 via 4 providers; agree: heuristic,1.0
+3,1783595296.3291044,SPY,buy,2.2901779942238725,6.396446056571449,0.1,paper,open call K=745.91 — net=+1.00 via 4 providers; agree: heuristic,1.0
+4,1783595296.404607,BTC-USD,buy,0.02037032092883771,501.92140004656176,0.1,paper,open put K=62738.7 — net=-1.00 via 4 providers; agree: heuristic,1.0
+5,1783595296.4844656,ETH-USD,buy,0.5104598140815217,13.961941377939297,0.1,paper,open put K=1745.2 — net=-1.00 via 4 providers; agree: heuristic,1.0
+6,1783602551.791957,MSFT,sell,6.916069533147198,5.226462108224467,0.1,paper,"close put — take-profit hit (mark 5.226 >= TP 4.548, +72%)",
+7,1783602553.470882,AMZN,buy,4.122370830134092,1.913083532502938,0.1,paper,open put K=239.13 — net=-1.00 via 4 providers; agree: heuristic,1.0
+8,1783602553.4898996,NVDA,buy,4.072290848278549,1.642435179409489,0.1,paper,"open put K=205.13 — net=-1.00 via 6 providers; agree: news, analysis, heuristic, perplexity",1.0
+9,1783602553.5086741,META,buy,1.2209632943009676,4.644040223376521,0.1,paper,"open put K=580.31 — net=-1.00 via 4 providers; agree: strategy, heuristic",1.0
+10,1783602553.5299542,TSLA,buy,1.4203435240893287,3.3827536215793828,0.1,paper,open call K=394.75 — net=+1.00 via 4 providers; agree: heuristic,1.0
+11,1783605837.4299233,AMZN,sell,4.122370830134092,0.7426563533490409,0.1,paper,"close put — stop-loss hit (mark 0.743 <= SL 1.148, -61%)",
+12,1783605837.4558213,NVDA,sell,4.072290848278549,4.0688605171759775,0.1,paper,"close put — take-profit hit (mark 4.069 >= TP 2.464, +148%)",
+13,1783605837.482416,META,sell,1.2209632943009676,0.4379800911079741,0.1,paper,"close put — stop-loss hit (mark 0.438 <= SL 2.786, -91%)",
+14,1783605839.656539,MSFT,buy,2.17760398056917,3.2369743823473414,0.1,paper,"open call K=377.51 — net=+1.00 via 6 providers; agree: news, analysis, heuristic, perplexity",1.0
+15,1783605839.6804152,GOOGL,buy,2.1009236412504007,2.8447112415960873,0.1,paper,open put K=355.58 — net=-1.00 via 4 providers; agree: heuristic,1.0
+16,1783605839.7026885,AMZN,buy,2.437080140690953,2.0783243297711067,0.1,paper,"open call K=242.36 — net=+1.00 via 4 providers; agree: strategy, heuristic",1.0
+17,1783605897.785898,TSLA,sell,1.4203435240893287,5.156029275529761,0.1,paper,"close call — take-profit hit (mark 5.156 >= TP 5.074, +52%)",
+18,1783605899.8274877,NVDA,buy,3.3396758777351554,1.6090742475417414,0.1,paper,"open put K=201.13 — net=-1.00 via 6 providers; agree: news, analysis, heuristic, perplexity",1.0
+19,1783606256.4657297,GOOGL,sell,2.1009236412504007,4.3299292023367855,0.1,paper,"close put — take-profit hit (mark 4.330 >= TP 4.267, +52%)",
+20,1783606258.4454129,GOOGL,buy,2.090517272457034,2.823342470193012,0.1,paper,open put K=352.91 — net=-1.00 via 4 providers; agree: strategy,1.0
+21,1783613114.3029273,AAPL,sell,11.202117885883638,4.131015603333793,0.1,paper,"close call — take-profit hit (mark 4.131 >= TP 4.017, +54%)",
+22,1783613115.7311842,TSLA,buy,3.47750101587586,3.430143613342892,0.1,paper,open call K=400.0 — net=+1.00 via 4 providers; agree: heuristic,1.0
+23,1783667036.602653,BTC-USD,sell,0.02037032092883771,131.12713618566522,0.1,paper,"close put — stop-loss hit (mark 131.127 <= SL 301.153, -74%)",
+24,1783667036.6231964,ETH-USD,sell,0.5104598140815217,4.8271661357350695,0.1,paper,"close put — stop-loss hit (mark 4.827 <= SL 8.377, -65%)",
+25,1783667036.6462877,MSFT,sell,2.17760398056917,7.5394224308834055,0.1,paper,"close call — take-profit hit (mark 7.539 >= TP 4.855, +133%)",
+26,1783667036.6673532,AMZN,sell,2.437080140690953,4.518879589126186,0.1,paper,"close call — take-profit hit (mark 4.519 >= TP 3.117, +117%)",
+27,1783667036.6881616,GOOGL,sell,2.090517272457034,1.018206761534401,0.1,paper,"close put — stop-loss hit (mark 1.018 <= SL 1.694, -64%)",
+28,1783667036.7104905,TSLA,sell,3.47750101587586,6.513836185361015,0.1,paper,"close call — take-profit hit (mark 6.514 >= TP 5.145, +90%)",
