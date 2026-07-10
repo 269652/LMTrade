@@ -10,6 +10,7 @@ signal when their key/host is missing, so the stack never blocks the loop.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -196,7 +197,8 @@ class CloudLLMProvider(ModelProvider):
             return Signal(self.name, "hold", 0.5, f"cloud error: {exc}", 0.0)
 
 
-def _default_claude_cli_runner(prompt: str, timeout: float = CLAUDE_CLI_TIMEOUT) -> str:
+def _default_claude_cli_runner(prompt: str, timeout: float = CLAUDE_CLI_TIMEOUT,
+                               model: str | None = None) -> str:
     """Run a prompt through the locally-installed Claude Code CLI in
     non-interactive print mode and return its stdout.
 
@@ -218,6 +220,8 @@ def _default_claude_cli_runner(prompt: str, timeout: float = CLAUDE_CLI_TIMEOUT)
     just the model's static training-cutoff knowledge."""
     exe = shutil.which(CLAUDE_CLI_BIN) or CLAUDE_CLI_BIN
     args = ["-p", "--output-format", "text", "--allowedTools", "WebSearch"]
+    if model:
+        args += ["--model", model]
     if os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
         cmd = ["cmd", "/c", exe, *args]
     else:
@@ -239,7 +243,14 @@ class ClaudeCLIProvider(ModelProvider):
     Anthropic HTTP API: no ANTHROPIC_API_KEY, billed through the user's own
     Claude subscription/login, and everything runs on the local machine.
     Serves both as a model-stack decision provider (`analyze`) and as a
-    research source (`research`) for the news/daily-analysis services."""
+    research source (`research`) for the news/daily-analysis services.
+
+    News/analysis are cheap, routine, frequent calls — they always run on
+    `settings.model.cloud_model` (Claude Haiku by default), independent of
+    whichever model the user's own interactive `claude` session defaults to.
+    The model is bound into the default runner via functools.partial so an
+    injected `runner` (tests, or any future non-CLI transport) keeps its
+    simple (prompt, timeout) signature untouched."""
 
     name = "claude_cli"
 
@@ -247,7 +258,9 @@ class ClaudeCLIProvider(ModelProvider):
                  runner: Callable[[str, float], str] | None = None):
         self.timeout = (settings.research.claude_cli_timeout_seconds
                         if settings is not None else CLAUDE_CLI_TIMEOUT)
-        self._runner = runner or _default_claude_cli_runner
+        self.model = settings.model.cloud_model if settings is not None else None
+        self._runner = runner or functools.partial(
+            _default_claude_cli_runner, model=self.model)
 
     def available(self) -> bool:
         return shutil.which(CLAUDE_CLI_BIN) is not None

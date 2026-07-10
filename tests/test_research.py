@@ -268,7 +268,7 @@ class TestNewsServiceClaudeCLI:
         )
         monkeypatch.setattr(
             "lmtrade.models.providers._default_claude_cli_runner",
-            lambda prompt, timeout: "AAPL steady. SENTIMENT: neutral",
+            lambda prompt, timeout, model=None: "AAPL steady. SENTIMENT: neutral",
         )
         svc = NewsService(store, settings)
         item = svc.get("AAPL")
@@ -294,7 +294,7 @@ class TestDailyAnalystClaudeCLI:
         response = json.dumps({"risk": {"stop_loss_pct": 0.04}, "notes": "trim risk"})
         monkeypatch.setattr(
             "lmtrade.models.providers._default_claude_cli_runner",
-            lambda prompt, timeout: response,
+            lambda prompt, timeout, model=None: response,
         )
         analyst = DailyAnalyst(store, settings)
         result = analyst.run()

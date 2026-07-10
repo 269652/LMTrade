@@ -98,6 +98,73 @@ class TestDefaultClaudeCLIRunner:
         with pytest.raises(RuntimeError, match="boom"):
             _default_claude_cli_runner("prompt")
 
+    def test_model_flag_passed_when_given(self, monkeypatch):
+        captured = self._patch(monkeypatch)
+        _default_claude_cli_runner("p", model="claude-haiku-4-5-20251001")
+        cmd = captured["cmd"]
+        assert "--model" in cmd
+        assert cmd[cmd.index("--model") + 1] == "claude-haiku-4-5-20251001"
+
+    def test_no_model_flag_when_omitted(self, monkeypatch):
+        captured = self._patch(monkeypatch)
+        _default_claude_cli_runner("p")
+        assert "--model" not in captured["cmd"]
+
+
+class TestClaudeCLIProviderUsesHaikuForNewsAndAnalysis:
+    """News search and daily analysis are cheap, frequent, routine calls —
+    they must always run on Claude Haiku (settings.model.cloud_model),
+    independent of whatever model the user's own interactive `claude`
+    session happens to default to."""
+
+    def _patch(self, monkeypatch):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return FakeCompletedProcess(stdout="AAPL steady. SENTIMENT: neutral")
+
+        monkeypatch.setattr("lmtrade.models.providers.shutil.which", lambda n: "/usr/bin/claude")
+        monkeypatch.setattr("lmtrade.models.providers.subprocess.run", fake_run)
+        return captured
+
+    def test_research_uses_configured_cloud_model(self, monkeypatch):
+        captured = self._patch(monkeypatch)
+        settings = Settings()
+        provider = ClaudeCLIProvider(settings)   # no runner override -> real default runner
+        provider.research("AAPL")
+        assert "--model" in captured["cmd"]
+        assert captured["cmd"][captured["cmd"].index("--model") + 1] == settings.model.cloud_model
+
+    def test_ask_uses_configured_cloud_model(self, monkeypatch):
+        captured = self._patch(monkeypatch)
+        settings = Settings()
+        provider = ClaudeCLIProvider(settings)
+        provider.ask("some analysis prompt")
+        assert "--model" in captured["cmd"]
+        assert captured["cmd"][captured["cmd"].index("--model") + 1] == settings.model.cloud_model
+
+    def test_without_settings_no_model_flag_forced(self, monkeypatch):
+        # No settings -> no opinion on model; CLI's own default applies.
+        captured = self._patch(monkeypatch)
+        provider = ClaudeCLIProvider()
+        provider.research("AAPL")
+        assert "--model" not in captured["cmd"]
+
+    def test_injected_runner_unaffected_by_model_threading(self, monkeypatch):
+        # Existing 2-arg (prompt, timeout) fakes used throughout the test
+        # suite must keep working even when settings carry a cloud_model.
+        calls = []
+
+        def fake_runner(prompt, timeout):
+            calls.append((prompt, timeout))
+            return "AAPL steady. SENTIMENT: neutral"
+
+        settings = Settings()
+        provider = ClaudeCLIProvider(settings, runner=fake_runner)
+        provider.research("AAPL")
+        assert len(calls) == 1
+
 
 class TestClaudeCLIProvider:
     def test_available_when_binary_on_path(self, monkeypatch):
