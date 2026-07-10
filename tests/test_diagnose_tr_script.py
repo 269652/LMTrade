@@ -1,18 +1,38 @@
-"""Smoke test for scripts/diagnose_tr.py.
+"""Tests for scripts/diagnose_tr.py.
 
-The script's entire purpose is exercising a REAL Trade Republic account over
-a real websocket — everything past the credentials check is explicitly
-untestable offline (this repo's own conventions require tests to run
-without network access or API keys; see CLAUDE.md). This only verifies the
-one path that IS deterministic and safe to run in CI: no TR_PHONE/TR_PIN set
--> a clear, immediate, non-zero exit with no attempt at network I/O."""
+Most of the script's purpose is exercising a REAL Trade Republic account
+over a real websocket — untestable offline (this repo's own conventions
+require tests to run without network access or API keys; see CLAUDE.md).
+The credentials-check path is the one deterministic, network-free path.
+
+The instrument-diagnosis helpers (_find_candidate_fields,
+_diagnose_derivative_items) are pure functions over already-fetched data,
+so they ARE unit-testable offline — and worth testing directly: they're
+what caught the live field-mapping bug (leverage/ask silently defaulting to
+0.0 for a wrong field name, so thousands of instruments looked 'usable' but
+none were ever tradeable)."""
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "diagnose_tr.py"
+
+
+def _load_script():
+    spec = importlib.util.spec_from_file_location("diagnose_tr", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def diagnose_tr():
+    return _load_script()
 
 
 def test_script_exists_and_is_executable():
@@ -29,3 +49,52 @@ def test_exits_cleanly_without_credentials(monkeypatch):
     )
     assert result.returncode == 1
     assert "TR_PHONE" in result.stdout
+
+
+class TestFindCandidateFields:
+    def test_finds_fields_by_name_hint_regardless_of_exact_guess(self, diagnose_tr):
+        item = {"isin": "DE1", "strikePrice": 100.0, "leverageFactor": 5.0,
+                "askPrice": 2.0, "unrelatedJunk": "x"}
+        candidates = diagnose_tr._find_candidate_fields(item)
+        assert "strikePrice" in candidates
+        assert "leverageFactor" in candidates
+        assert "askPrice" in candidates
+        assert "unrelatedJunk" not in candidates
+
+    def test_no_hints_returns_empty(self, diagnose_tr):
+        assert diagnose_tr._find_candidate_fields({"foo": 1, "bar": 2}) == {}
+
+
+class TestDiagnoseDerivativeItems:
+    def test_reports_wrong_field_name_as_unparsed_not_silent_zero(self, diagnose_tr, capsys):
+        # The live incident: real fields under different names than
+        # 'ask'/'leverage'. Since tr_derivatives.py now requires these
+        # fields (no silent 0 default — see _parse_knockout_item), a wrong
+        # name correctly shows up as 0 PARSED, not '5 parsed -> 0
+        # tradeable' (which is what masked the bug in the first place: it
+        # looked like a healthy parse with an oddly-empty leverage band).
+        items = [{"isin": f"DE{i}", "strike": 100.0,
+                  "leverageFactor": 5.0, "askPrice": 2.0} for i in range(5)]
+        diagnose_tr._diagnose_derivative_items(items, "AAPL", "_parse_knockout_item")
+        out = capsys.readouterr().out
+        assert "5 raw -> 0 parsed -> 0 tradeable" in out
+        assert "leverageFactor" in out   # candidate field surfaced
+        assert "askPrice" in out
+
+    def test_reports_healthy_funnel_when_fields_correct(self, diagnose_tr, capsys):
+        items = [{"isin": "DE1", "strike": 100.0, "ask": 2.0, "leverage": 5.0}]
+        diagnose_tr._diagnose_derivative_items(items, "AAPL", "_parse_knockout_item")
+        out = capsys.readouterr().out
+        assert "1 raw -> 1 parsed -> 1 tradeable" in out
+
+    def test_reports_unparseable_items_distinctly(self, diagnose_tr, capsys):
+        items = [{"isin": "DE1"}]   # missing strike entirely
+        diagnose_tr._diagnose_derivative_items(items, "AAPL", "_parse_knockout_item")
+        out = capsys.readouterr().out
+        assert "1 raw -> 0 parsed -> 0 tradeable" in out
+
+    def test_does_not_crash_on_malformed_items(self, diagnose_tr):
+        # Must not raise despite thoroughly broken input, including a
+        # literal null entry in the results list.
+        items = [None, {}, {"isin": "DE1", "strike": "not-a-number"}]
+        diagnose_tr._diagnose_derivative_items(items, "AAPL", "_parse_knockout_item")

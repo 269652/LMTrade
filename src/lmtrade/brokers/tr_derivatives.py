@@ -337,6 +337,14 @@ class PytrDerivatives(TRDerivativesBase):
 
     @staticmethod
     def _parse_knockout_item(item: dict, underlying: str, direction: str) -> TRDerivativeQuote:
+        # price/leverage are REQUIRED (item["..."], no .get(..., 0) default).
+        # Live incident: a wrong field-name guess silently defaulted both to
+        # 0, so every instrument "parsed" (no KeyError) yet failed
+        # find_knockout()'s price>0/leverage-band filter — thousands of
+        # instruments logged as 'usable', zero ever tradeable, no diagnostic
+        # ever fired because nothing LOOKED broken. Requiring these fields
+        # turns a wrong guess back into a loud, correctly-counted parse
+        # failure instead of a quiet no-op.
         return TRDerivativeQuote(
             isin=item["isin"], underlying=underlying,
             # Every result from this query is labeled with the requested
@@ -347,12 +355,15 @@ class PytrDerivatives(TRDerivativesBase):
             strike=float(item["strike"]),
             barrier=float(item.get("barrier", item["strike"])),
             ratio=float(item.get("ratio", 1.0) or 1.0),
-            price=float(item.get("ask", 0) or 0),
-            leverage=float(item.get("leverage", 0) or 0),
+            price=float(item["ask"]),
+            leverage=float(item["leverage"]),
             issuer=str(item.get("issuerDisplayName", "")))
 
     @staticmethod
     def _parse_vanilla_item(item: dict, underlying: str, direction: str) -> TRDerivativeQuote:
+        # See _parse_knockout_item: price/leverage are required, not
+        # silently-defaulted, so a wrong field-name guess is loudly
+        # diagnosable instead of masquerading as a zero-leverage "success".
         expiry_raw = (item.get("expiry") or item.get("expiryDate")
                      or item.get("maturityDate") or item.get("maturity"))
         return TRDerivativeQuote(
@@ -361,8 +372,8 @@ class PytrDerivatives(TRDerivativesBase):
             strike=float(item["strike"]),
             barrier=None,     # vanilla warrant: no knockout barrier
             ratio=float(item.get("ratio", 1.0) or 1.0),
-            price=float(item.get("ask", 0) or 0),
-            leverage=float(item.get("leverage", 0) or 0),
+            price=float(item["ask"]),
+            leverage=float(item["leverage"]),
             issuer=str(item.get("issuerDisplayName", "")),
             expiry_ts=_parse_ts(expiry_raw))
 

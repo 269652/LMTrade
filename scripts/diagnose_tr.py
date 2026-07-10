@@ -73,6 +73,81 @@ async def _query(api, sub_id_coro, recv_for) -> tuple[bool, object]:
         return False, exc
 
 
+# Substrings that hint a raw field is the one the bot's parser is looking
+# for, regardless of whether it's under the name currently guessed in
+# tr_derivatives.py. Live incident this caught: TR's real field names for
+# ask price and leverage were NOT "ask"/"leverage" — the parser silently
+# defaulted both to 0.0 (item.get(field, 0)), so every instrument "parsed"
+# successfully yet failed the price>0/leverage-band tradeability check, and
+# nothing ever looked broken until this diagnostic dumped the raw payload.
+_FIELD_HINTS = ("lever", "ask", "bid", "price", "strike", "barrier", "ratio",
+                "expir", "matur", "isin")
+
+
+def _find_candidate_fields(item: dict) -> dict:
+    return {k: v for k, v in item.items()
+            if any(hint in str(k).lower() for hint in _FIELD_HINTS)}
+
+
+def _diagnose_derivative_items(items: list, symbol: str, parser_name: str) -> None:
+    """For a sample of raw instruments: dump the full raw JSON, run the
+    bot's ACTUAL parser against it (showing what it extracts or why it
+    fails), and call out fields whose NAME hints at strike/ask/leverage/
+    barrier/ratio/expiry — even under a different name than currently
+    guessed — so the real field mapping is visible without a round trip.
+    Finishes with a raw -> parsed -> tradeable funnel so a 'parses fine but
+    never tradeable' mismatch (wrong ask/leverage field, defaulting to 0) is
+    immediately obvious rather than looking like a healthy 'usable' count."""
+    from lmtrade.brokers.tr_derivatives import PytrDerivatives
+    from lmtrade.finance.knockouts import MAX_LEVERAGE, MIN_LEVERAGE
+
+    parser = getattr(PytrDerivatives, parser_name)
+    sample = items[:3]
+    for i, item in enumerate(sample):
+        print(f"\n  --- instrument {i + 1}/{len(sample)} (of {len(items)} total) ---")
+        _dump("raw", item)
+        if not isinstance(item, dict):
+            _fail(f"item is not an object ({type(item).__name__}) — cannot parse.")
+            continue
+        candidates = _find_candidate_fields(item)
+        if candidates:
+            _dump("fields whose NAME hints strike/ask/leverage/barrier/ratio/"
+                  "expiry (compare against tr_derivatives.py's parsing even "
+                  "if the name differs from what's currently guessed)",
+                  candidates)
+        try:
+            q = parser(item, symbol, "buy")
+            _ok(f"parser extracts: price={q.price} leverage={q.leverage} "
+                f"strike={q.strike} barrier={q.barrier}")
+        except (KeyError, TypeError, ValueError) as exc:
+            _fail(f"parser failed on this item: {exc!r} — a required field "
+                  "is missing or under a different name (see candidates above).")
+
+    parsed_ok = tradeable = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            q = parser(item, symbol, "buy")
+        except (KeyError, TypeError, ValueError):
+            continue
+        parsed_ok += 1
+        if q.price > 0 and MIN_LEVERAGE <= q.leverage <= MAX_LEVERAGE:
+            tradeable += 1
+    funnel = (f"{len(items)} raw -> {parsed_ok} parsed -> {tradeable} tradeable "
+             f"(price>0 and {MIN_LEVERAGE:g}x <= leverage <= {MAX_LEVERAGE:g}x)")
+    if tradeable > 0:
+        _ok(funnel)
+    elif parsed_ok > 0:
+        _fail(funnel + " — parses but NEVER passes the tradeability filter. "
+              "Compare the candidate fields dumped above against "
+              "tr_derivatives.py's _parse_knockout_item/_parse_vanilla_item "
+              "('ask' and 'leverage' are the current guesses) and fix the "
+              "mapping if the real field has a different name.")
+    else:
+        _fail(funnel)
+
+
 def main() -> int:
     symbol = sys.argv[1] if len(sys.argv) > 1 else "AAPL"
 
@@ -174,24 +249,23 @@ def main() -> int:
         # knockout/Turbo may still have a vanilla put/call warrant, and
         # that's common, not a bug. Reports raw results for each so a
         # rejected/guessed category name is immediately visible.
-        for category, _parser_name, label in PytrDerivatives._CATEGORIES:
+        for category, parser_name, label in PytrDerivatives._CATEGORIES:
             _section(f"{label.title()} derivative search ({symbol} / {isin}, category={category!r})")
             ok, result = loop.run_until_complete(
                 _query(api, api.search_derivative(isin, category), _recv_for))
-            if ok:
-                items = (result or {}).get("results", [])
-                _ok(f"search_derivative subscription answered — {len(items)} instrument(s)")
-                if items:
-                    _dump("first raw instrument (check field names against "
-                          "tr_derivatives.py's parsing)", items[0])
-                else:
-                    _dump("raw payload (empty results)", result)
-            else:
+            if not ok:
                 blob = f"{getattr(result, 'error', '')} {result}"
                 if "BAD_SUBSCRIPTION_TYPE" in blob or "Unknown topic type" in blob:
                     _fail(f"category {category!r} rejected by this account")
                 else:
                     _fail(f"search_derivative failed: {result!r}")
+                continue
+            items = (result or {}).get("results", [])
+            _ok(f"search_derivative subscription answered — {len(items)} raw instrument(s)")
+            if not items:
+                _dump("raw payload (empty results)", result)
+                continue
+            _diagnose_derivative_items(items, symbol, parser_name)
     else:
         _info("Skipping derivative search — no ISIN resolved above.")
 

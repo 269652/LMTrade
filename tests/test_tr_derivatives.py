@@ -468,6 +468,26 @@ class TestPytrSearchDiagnostics:
         blob = " ".join(r.message for r in caplog.records)
         assert "AAPL" in blob
 
+    def test_wrong_leverage_field_name_is_a_parse_failure_not_silent_zero(self, caplog):
+        """Live incident: TR returned THOUSANDS of instruments per symbol, all
+        counted as 'usable', yet find_knockout() still found nothing
+        tradeable — because 'leverage'/'ask' silently defaulted to 0 for a
+        wrong field-name guess instead of being treated as unparsed. A
+        leverage of exactly 0.0 across every instrument is never real market
+        data; it must surface as a loud diagnostic, not a quiet 'success'."""
+        import logging
+
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results=[
+                {"isin": "DE1", "strike": 100.0, "leverageFactor": 5.0, "askPrice": 2.0}])
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        with caplog.at_level(logging.WARNING, logger="lmtrade.tr"):
+            out = client.search("AAPL", "buy")
+        assert out == [], "wrong field name must not silently produce a 0-leverage 'quote'"
+        blob = " ".join(r.message for r in caplog.records)
+        assert "leverageFactor" in blob or "askPrice" in blob  # real fields dumped
+
 
 class FakeTRError(ValueError):
     """Mirrors pytr.api.TradeRepublicError: a rejected subscription surfaces as
