@@ -82,6 +82,50 @@ class TestOptionPositions:
         assert len(store.open_options()) == 2
 
 
+class TestPendingOptionLifecycle:
+    """A live order goes pending -> open (TR-confirmed) -> closed, so the
+    dashboard can show 'an order is in flight' instead of nothing appearing
+    until full confirmation. Paper fills are unaffected (default status
+    stays 'open', immediate)."""
+
+    def test_pending_status_not_returned_by_open_options(self, store: Store):
+        oid = store.open_option("AAPL", "ko_call", 100.0, time.time() + 86400,
+                                iv=0.0, contracts=1.0, entry_premium=2.0,
+                                genome_id=None, status="pending")
+        assert store.open_options() == []
+        pending = store.pending_options()
+        assert len(pending) == 1
+        assert pending[0]["id"] == oid
+        assert pending[0]["status"] == "pending"
+
+    def test_mark_option_open_flips_status(self, store: Store):
+        oid = store.open_option("AAPL", "ko_call", 100.0, time.time() + 86400,
+                                iv=0.0, contracts=1.0, entry_premium=2.0,
+                                genome_id=None, status="pending")
+        store.mark_option_open(oid)
+        assert store.pending_options() == []
+        open_rows = store.open_options()
+        assert len(open_rows) == 1
+        assert open_rows[0]["id"] == oid
+        assert open_rows[0]["status"] == "open"
+
+    def test_default_status_is_open_paper_unaffected(self, store: Store):
+        oid = store.open_option("AAPL", "call", 100.0, time.time() + 86400,
+                                iv=0.35, contracts=1.0, entry_premium=1.0,
+                                genome_id=None)
+        assert store.open_options()[0]["id"] == oid
+        assert store.pending_options() == []
+
+    def test_delete_option_removes_pending_row(self, store: Store):
+        # A rejected/unconfirmed order's pending row must not linger.
+        oid = store.open_option("AAPL", "ko_call", 100.0, time.time() + 86400,
+                                iv=0.0, contracts=1.0, entry_premium=2.0,
+                                genome_id=None, status="pending")
+        store.delete_option(oid)
+        assert store.pending_options() == []
+        assert store.open_options() == []
+
+
 class TestNewsCache:
     def test_latest_news_roundtrip(self, store: Store):
         assert store.latest_news("AAPL") is None

@@ -128,6 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         is_live = control().mode == "live"
         equity_positions = store().positions()
         open_opts = store().open_options()
+        pending_opts = store().pending_options()
         tr_cash = _tr_meta("tr_account_cash")
         # LIVE view: cash is the REAL TR balance (None until fetched) — never
         # default an empty live book to the paper budget, which fabricated a
@@ -159,7 +160,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             {"symbol": p.symbol, "qty": round(p.qty, 6),
              "avg_price": round(p.avg_price, 4), "kind": "equity", "isin": None,
              "value": None, "unrealized_pnl": None,
-             "sl_premium": None, "tp_premium": None}
+             "sl_premium": None, "tp_premium": None, "status": "open"}
             for p in equity_positions
         ]
         for o in open_opts:
@@ -178,6 +179,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "unrealized_pnl": mark.get("unrealized_pnl") if mark else None,
                 "sl_premium": o.get("sl_premium"),
                 "tp_premium": o.get("tp_premium"),
+                "status": "open",
+            })
+        for o in pending_opts:
+            # A real order submitted to TR but not yet positively confirmed —
+            # no mark/value yet (nothing to value until it's actually held).
+            kind = o.get("instrument_type") or "option"
+            label = f"{o['underlying']} {o.get('kind', '')}".strip()
+            rows.append({
+                "symbol": label,
+                "qty": round(o.get("contracts", 0.0), 6),
+                "avg_price": round(o.get("entry_premium", 0.0), 4),
+                "kind": kind,
+                "isin": o.get("isin"),
+                "value": None,
+                "unrealized_pnl": None,
+                "sl_premium": o.get("sl_premium"),
+                "tp_premium": o.get("tp_premium"),
+                "status": "pending",
             })
         return SafeJSONResponse({
             "mode": store().get_meta("mode", settings.mode),

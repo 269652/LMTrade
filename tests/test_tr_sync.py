@@ -88,6 +88,45 @@ class TestSyncTrPortfolio:
         sync_tr_portfolio(store, FakeTR(cash=None, portfolio=None))
         assert len(store.open_options()) == 1
 
+    def test_pending_row_confirmed_in_real_portfolio_flips_to_open(self, store):
+        # Crash-recovery case: the engine created a pending row, placed the
+        # order, then the process died before mark_option_open() ran. TR's
+        # own portfolio is authoritative — if it's really there, promote it.
+        store.open_option("AAPL", "ko_call", strike=80.0, expiry_ts=4e12, iv=0.0,
+                          contracts=5.0, entry_premium=2.0, genome_id=None,
+                          tp_premium=3.0, sl_premium=1.0,
+                          instrument_type="knockout", barrier=80.0, ratio=10.0,
+                          isin="DE000CRASHED", status="pending")
+        sync_tr_portfolio(store, FakeTR(portfolio=[
+            {"isin": "DE000CRASHED", "size": 5.0, "avg_price": 2.0}]))
+        assert store.pending_options() == []
+        opts = store.open_options()
+        assert len(opts) == 1
+        assert opts[0]["isin"] == "DE000CRASHED"
+        assert opts[0]["status"] == "open"
+
+    def test_pending_row_not_in_real_portfolio_is_deleted(self, store):
+        # Crash-recovery case: the order attempt never actually went through
+        # (or was rejected) before the process died — TR doesn't have it, so
+        # the pending row is a phantom, same as a stale open row would be.
+        store.open_option("AAPL", "ko_call", strike=80.0, expiry_ts=4e12, iv=0.0,
+                          contracts=5.0, entry_premium=2.0, genome_id=None,
+                          tp_premium=3.0, sl_premium=1.0,
+                          instrument_type="knockout", barrier=80.0, ratio=10.0,
+                          isin="DE000NEVERWENT", status="pending")
+        sync_tr_portfolio(store, FakeTR(portfolio=[]))
+        assert store.pending_options() == []
+        assert store.open_options() == []
+
+    def test_pending_row_unchanged_when_portfolio_unavailable(self, store):
+        store.open_option("AAPL", "ko_call", strike=80.0, expiry_ts=4e12, iv=0.0,
+                          contracts=5.0, entry_premium=2.0, genome_id=None,
+                          tp_premium=3.0, sl_premium=1.0,
+                          instrument_type="knockout", barrier=80.0, ratio=10.0,
+                          isin="DE000REAL01", status="pending")
+        sync_tr_portfolio(store, FakeTR(cash=None, portfolio=None))
+        assert len(store.pending_options()) == 1
+
 
 class TestSharedSession:
     def test_broker_and_derivatives_share_one_api(self, monkeypatch, tmp_path):

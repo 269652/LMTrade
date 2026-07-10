@@ -165,11 +165,21 @@ function pnlCell(v) {
 
 function paintPositions(rows) {
   $("positions").innerHTML = rows.length
-    ? rows.map(p => `<tr><td>${p.symbol}</td><td><span class="kind">${p.kind || "equity"}</span></td>`
-        + `<td>${p.isin || "—"}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.avg_price)}</td>`
-        + `<td>${p.sl_premium == null ? "—" : fmt(p.sl_premium)}</td>`
-        + `<td>${p.tp_premium == null ? "—" : fmt(p.tp_premium)}</td>`
-        + `<td>${p.value == null ? "—" : fmt(p.value)}</td>${pnlCell(p.unrealized_pnl)}</tr>`).join("")
+    ? rows.map(p => {
+        const pending = p.status === "pending";
+        const symbol = pending
+          ? `${p.symbol} <span class="pill hold" title="Order submitted to Trade Republic, awaiting confirmation">PENDING</span>`
+          : p.symbol;
+        const valueCell = pending
+          ? `<td class="muted">pending…</td>`
+          : `<td>${p.value == null ? "—" : fmt(p.value)}</td>`;
+        const pnlCellHtml = pending ? `<td class="muted">pending…</td>` : pnlCell(p.unrealized_pnl);
+        return `<tr><td>${symbol}</td><td><span class="kind">${p.kind || "equity"}</span></td>`
+          + `<td>${p.isin || "—"}</td><td>${fmt(p.qty,4)}</td><td>${fmt(p.avg_price)}</td>`
+          + `<td>${p.sl_premium == null ? "—" : fmt(p.sl_premium)}</td>`
+          + `<td>${p.tp_premium == null ? "—" : fmt(p.tp_premium)}</td>`
+          + valueCell + pnlCellHtml + `</tr>`;
+      }).join("")
     : `<tr><td colspan="9" class="muted">No open positions.</td></tr>`;
 }
 

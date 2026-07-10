@@ -308,19 +308,30 @@ class Store:
         tp_premium: float | None = None, sl_premium: float | None = None,
         instrument_type: str = "option", barrier: float | None = None,
         ratio: float | None = None, isin: str | None = None,
+        status: str = "open",
     ) -> int:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO option_positions(underlying,kind,strike,expiry_ts,iv,"
                 "contracts,entry_premium,opened_ts,genome_id,tp_premium,sl_premium,"
-                "instrument_type,barrier,ratio,isin) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "instrument_type,barrier,ratio,isin,status) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (underlying, kind, strike, expiry_ts, iv, contracts, entry_premium,
                  time.time(), genome_id, tp_premium, sl_premium,
-                 instrument_type, barrier, ratio, isin),
+                 instrument_type, barrier, ratio, isin, status),
             )
             self._conn.commit()
             return int(cur.lastrowid)
+
+    def mark_option_open(self, opt_id: int) -> None:
+        """Flip a 'pending' live order to 'open' once TR has positively
+        confirmed the fill (an order id). Real-money orders go pending ->
+        open -> closed, so the dashboard can show 'an order is in flight'
+        instead of nothing appearing until full confirmation."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE option_positions SET status='open' WHERE id=?", (opt_id,))
+            self._conn.commit()
 
     def close_option(self, opt_id: int, exit_premium: float, pnl: float) -> None:
         with self._lock:
@@ -335,6 +346,16 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM option_positions WHERE status='open'"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def pending_options(self) -> list[dict]:
+        """Live orders submitted to TR but not yet positively confirmed —
+        excluded from open_options() (and so from valuation/marking) until
+        mark_option_open() promotes them."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM option_positions WHERE status='pending'"
             ).fetchall()
         return [dict(r) for r in rows]
 

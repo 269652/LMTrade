@@ -170,19 +170,28 @@ def main() -> int:
         _fail(f"search failed: {result!r}")
 
     if isin:
-        _section(f"Knockout derivative search ({symbol} / {isin})")
-        ok, result = loop.run_until_complete(
-            _query(api, api.search_derivative(isin, PytrDerivatives.PRODUCT_CATEGORY), _recv_for))
-        if ok:
-            items = (result or {}).get("results", [])
-            _ok(f"search_derivative subscription answered — {len(items)} instrument(s)")
-            if items:
-                _dump("first raw instrument (check field names against "
-                      "tr_derivatives.py's parsing)", items[0])
+        # Every product category the bot searches — a symbol with no
+        # knockout/Turbo may still have a vanilla put/call warrant, and
+        # that's common, not a bug. Reports raw results for each so a
+        # rejected/guessed category name is immediately visible.
+        for category, _parser_name, label in PytrDerivatives._CATEGORIES:
+            _section(f"{label.title()} derivative search ({symbol} / {isin}, category={category!r})")
+            ok, result = loop.run_until_complete(
+                _query(api, api.search_derivative(isin, category), _recv_for))
+            if ok:
+                items = (result or {}).get("results", [])
+                _ok(f"search_derivative subscription answered — {len(items)} instrument(s)")
+                if items:
+                    _dump("first raw instrument (check field names against "
+                          "tr_derivatives.py's parsing)", items[0])
+                else:
+                    _dump("raw payload (empty results)", result)
             else:
-                _dump("raw payload (empty results)", result)
-        else:
-            _fail(f"search_derivative failed: {result!r}")
+                blob = f"{getattr(result, 'error', '')} {result}"
+                if "BAD_SUBSCRIPTION_TYPE" in blob or "Unknown topic type" in blob:
+                    _fail(f"category {category!r} rejected by this account")
+                else:
+                    _fail(f"search_derivative failed: {result!r}")
     else:
         _info("Skipping derivative search — no ISIN resolved above.")
 

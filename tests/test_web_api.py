@@ -107,6 +107,25 @@ class TestSummaryIncludesOptions:
         assert row["sl_premium"] is None
         assert row["tp_premium"] is None
 
+    def test_pending_order_appears_with_pending_status_and_no_value(self, tmp_path):
+        s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
+                    data={"provider": "synthetic"})
+        s.data_dir = tmp_path
+        store = Store(s.db_path)
+        store.open_option("NVDA", "put", strike=200.0, expiry_ts=4e12, iv=0.2,
+                          contracts=1.0, entry_premium=4.0, genome_id=None,
+                          tp_premium=6.0, sl_premium=2.4, instrument_type="knockout",
+                          barrier=200.0, ratio=10.0, isin="DE000PENDING",
+                          status="pending")
+        store.close()
+        s2 = TestClient(create_app(s)).get("/api/summary").json()
+        row = next(p for p in s2["positions"] if "NVDA" in p["symbol"])
+        assert row["status"] == "pending"
+        assert row["value"] is None
+        assert row["unrealized_pnl"] is None
+        assert row["isin"] == "DE000PENDING"
+        assert s2["num_positions"] == 1
+
     def test_positions_include_live_pnl_from_persisted_marks(self, tmp_path):
         s = Settings(mode="paper", budget=100.0, universe=["AAPL"],
                      data={"provider": "synthetic"})

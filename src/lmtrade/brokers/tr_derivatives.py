@@ -117,13 +117,14 @@ def _patch_ws_max_size(ws_module: Any) -> None:
 class TRDerivativeQuote:
     isin: str
     underlying: str
-    kind: str            # ko_call | ko_put
+    kind: str            # ko_call | ko_put (knockouts) or call | put (vanilla warrants)
     strike: float
-    barrier: float
+    barrier: float | None   # None for vanilla warrants — no knockout barrier
     ratio: float
     price: float         # ask per certificate
     leverage: float
     issuer: str = ""
+    expiry_ts: float | None = None   # vanilla warrants only; knockouts are open-ended
 
 
 def _parse_cash(payload: Any) -> float | None:
@@ -148,6 +149,28 @@ def _parse_cash(payload: Any) -> float | None:
     return best
 
 
+def _parse_ts(raw: Any) -> float | None:
+    """Tolerant timestamp parser for a vanilla warrant's expiry — TR's exact
+    field/format for this is unverified (no live account to check against),
+    so this accepts the plausible shapes: epoch milliseconds, epoch seconds,
+    or an ISO 8601 date/datetime string. None (not a guessed default) on
+    anything unrecognized — the caller decides the fallback."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        # TR's other timestamped fields are epoch-ms; a value that large is
+        # almost certainly milliseconds, not seconds (seconds would be ~5
+        # digits for any near-term expiry vs. this century's ~13-digit ms).
+        return raw / 1000.0 if raw > 10_000_000_000 else float(raw)
+    if isinstance(raw, str):
+        import datetime as _dt
+        try:
+            return _dt.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
 class TRDerivativesBase:
     """Interface: find the best-fitting real KO instrument for a signal."""
 
@@ -170,13 +193,21 @@ class TRDerivativesBase:
         reconcile (delete local rows) against it."""
         return None
 
+    # A "buy" wants a call-direction instrument, "sell" a put-direction one —
+    # across BOTH product types this client can return (knockouts use
+    # ko_call/ko_put, vanilla warrants use call/put).
+    _CALL_KINDS = frozenset({"ko_call", "call"})
+    _PUT_KINDS = frozenset({"ko_put", "put"})
+
     def find_knockout(self, underlying: str, direction: str, spot: float,
                       target_leverage: float) -> TRDerivativeQuote | None:
         """Best instrument = tradeable leverage closest to target, within the
-        sane retail band."""
-        kind = "ko_call" if direction == "buy" else "ko_put"
+        sane retail band. Candidates span every product type search() found
+        (real Turbos/knockouts AND vanilla put/call warrants) — whichever
+        actually exists for this underlying and best fits the target."""
+        wanted = self._CALL_KINDS if direction == "buy" else self._PUT_KINDS
         candidates = [q for q in self.search(underlying, direction)
-                      if q.kind == kind and q.price > 0
+                      if q.kind in wanted and q.price > 0
                       and MIN_LEVERAGE <= q.leverage <= MAX_LEVERAGE]
         if not candidates:
             return None
@@ -282,22 +313,64 @@ class PytrDerivatives(TRDerivativesBase):
                 return isin
         return None
 
-    # Best-effort productCategory value — TR's backend rejected the plain
+    # Best-effort productCategory values — TR's backend rejected the plain
     # "knockout" as a schema-invalid payload against a live account (seen as
     # a JSON_PARSE_ERROR/"validation failed" from TR's own MAPPER service).
-    # This environment has no live TR access to verify the exact value, so
-    # this is a single educated guess: TR's other subscription type names are
+    # This environment has no live TR access to verify the exact values, so
+    # these are educated guesses: TR's other subscription type names are
     # camelCase compounds (portfolioAggregateHistory, instrumentSuitability,
-    # timelineDetailV2), matching this value's shape better than the flat
-    # lowercase one did.
+    # timelineDetailV2), matching this shape better than flat lowercase ones.
+    #
+    # Live incident: MOST symbols return zero knockOutProduct instruments —
+    # TR simply doesn't list a Turbo for them, not a bug in this client. TR
+    # also sells vanilla put/call warrants (no knockout barrier) under a
+    # separate category; search() tries both and merges whatever exists.
     PRODUCT_CATEGORY = "knockOutProduct"
+    VANILLA_PRODUCT_CATEGORY = "vanillaWarrant"
 
-    async def _fetch_derivatives(self, api: Any, isin: str) -> list[dict]:
-        sub_id = await api.search_derivative(isin, self.PRODUCT_CATEGORY)
+    async def _fetch_derivatives(self, api: Any, isin: str, category: str) -> list[dict]:
+        sub_id = await api.search_derivative(isin, category)
         payload = await _recv_for(api, sub_id)
         await api.unsubscribe(sub_id)
-        log.debug("TR search_derivative(%s, %s) -> %r", isin, self.PRODUCT_CATEGORY, payload)
+        log.debug("TR search_derivative(%s, %s) -> %r", isin, category, payload)
         return (payload or {}).get("results", [])
+
+    @staticmethod
+    def _parse_knockout_item(item: dict, underlying: str, direction: str) -> TRDerivativeQuote:
+        return TRDerivativeQuote(
+            isin=item["isin"], underlying=underlying,
+            # Every result from this query is labeled with the requested
+            # direction rather than an actual call/put field from the
+            # response (unconfirmed field name) — a pre-existing
+            # simplification, not new here.
+            kind="ko_call" if direction == "buy" else "ko_put",
+            strike=float(item["strike"]),
+            barrier=float(item.get("barrier", item["strike"])),
+            ratio=float(item.get("ratio", 1.0) or 1.0),
+            price=float(item.get("ask", 0) or 0),
+            leverage=float(item.get("leverage", 0) or 0),
+            issuer=str(item.get("issuerDisplayName", "")))
+
+    @staticmethod
+    def _parse_vanilla_item(item: dict, underlying: str, direction: str) -> TRDerivativeQuote:
+        expiry_raw = (item.get("expiry") or item.get("expiryDate")
+                     or item.get("maturityDate") or item.get("maturity"))
+        return TRDerivativeQuote(
+            isin=item["isin"], underlying=underlying,
+            kind="call" if direction == "buy" else "put",
+            strike=float(item["strike"]),
+            barrier=None,     # vanilla warrant: no knockout barrier
+            ratio=float(item.get("ratio", 1.0) or 1.0),
+            price=float(item.get("ask", 0) or 0),
+            leverage=float(item.get("leverage", 0) or 0),
+            issuer=str(item.get("issuerDisplayName", "")),
+            expiry_ts=_parse_ts(expiry_raw))
+
+    # (category, parser, human label for diagnostics)
+    _CATEGORIES = (
+        (PRODUCT_CATEGORY, "_parse_knockout_item", "knockout"),
+        (VANILLA_PRODUCT_CATEGORY, "_parse_vanilla_item", "vanilla warrant"),
+    )
 
     def search(self, underlying: str, direction: str) -> list[TRDerivativeQuote]:
         api = self._login()
@@ -306,54 +379,51 @@ class PytrDerivatives(TRDerivativesBase):
         try:
             import asyncio
 
-            async def _query() -> list[dict]:
+            async def _query() -> list[tuple[str, str, list[dict]]]:
                 isin = await self._resolve_isin(api, underlying)
                 if isin is None:
                     return []
-                return await self._fetch_derivatives(api, isin)
+                out = []
+                for category, parser_name, label in self._CATEGORIES:
+                    items = await self._fetch_derivatives(api, isin, category)
+                    out.append((parser_name, label, items))
+                return out
 
-            items = asyncio.get_event_loop().run_until_complete(_query())
+            by_category = asyncio.get_event_loop().run_until_complete(_query())
             out: list[TRDerivativeQuote] = []
-            first_error: Exception | None = None
-            for item in items:
-                try:
-                    out.append(TRDerivativeQuote(
-                        isin=item["isin"], underlying=underlying,
-                        # Every result from this query is labeled with the
-                        # requested direction rather than an actual call/put
-                        # field from the response (unconfirmed field name) —
-                        # a pre-existing simplification, not new here.
-                        kind="ko_call" if direction == "buy" else "ko_put",
-                        strike=float(item["strike"]),
-                        barrier=float(item.get("barrier", item["strike"])),
-                        ratio=float(item.get("ratio", 1.0) or 1.0),
-                        price=float(item.get("ask", 0) or 0),
-                        leverage=float(item.get("leverage", 0) or 0),
-                        issuer=str(item.get("issuerDisplayName", ""))))
-                except (KeyError, TypeError, ValueError) as exc:
-                    if first_error is None:
-                        first_error = exc
-                    continue  # tolerate payload drift per-instrument
-            if items and not out:
-                # TR returned instruments but our field mapping matched none —
-                # this symbol will simply have no tradeable instrument this
-                # cycle (no synthetic fallback). Dump the real field names so
-                # the mapping above can be corrected against a live account;
-                # without TR access from the dev environment this is
-                # unverifiable in code.
-                log.warning(
-                    "TR knockout search for %s: %d instrument(s) returned but "
-                    "NONE parsed (first error: %r). Actual fields on the first "
-                    "item: %s. The response field mapping in tr_derivatives.py "
-                    "needs updating for your pytr/TR version — no positions "
-                    "will open for %s until this is fixed.",
-                    underlying, len(items), first_error, sorted(items[0].keys()),
-                    underlying)
-            elif out:
-                log.info("TR knockout search for %s: %d raw -> %d usable instrument(s).",
-                         underlying, len(items), len(out))
-            else:
-                log.debug("TR knockout search for %s: no instruments returned.", underlying)
+            for parser_name, label, items in by_category:
+                parser = getattr(self, parser_name)
+                parsed: list[TRDerivativeQuote] = []
+                first_error: Exception | None = None
+                for item in items:
+                    try:
+                        parsed.append(parser(item, underlying, direction))
+                    except (KeyError, TypeError, ValueError) as exc:
+                        if first_error is None:
+                            first_error = exc
+                        continue  # tolerate payload drift per-instrument
+                if items and not parsed:
+                    # TR returned instruments but our field mapping matched
+                    # none — this symbol will simply have no tradeable
+                    # instrument in this category this cycle (no synthetic
+                    # fallback). Dump the real field names so the mapping
+                    # above can be corrected against a live account; without
+                    # TR access from the dev environment this is
+                    # unverifiable in code.
+                    log.warning(
+                        "TR %s search for %s: %d instrument(s) returned but "
+                        "NONE parsed (first error: %r). Actual fields on the "
+                        "first item: %s. The response field mapping in "
+                        "tr_derivatives.py needs updating for your pytr/TR "
+                        "version.", label, underlying, len(items), first_error,
+                        sorted(items[0].keys()))
+                elif parsed:
+                    log.info("TR %s search for %s: %d raw -> %d usable instrument(s).",
+                             label, underlying, len(items), len(parsed))
+                else:
+                    log.debug("TR %s search for %s: no instruments returned.",
+                             label, underlying)
+                out.extend(parsed)
             return out
         except Exception as exc:  # noqa: BLE001
             # A stale-session error (e.g. HTTP 401 on the websocket) surfaces

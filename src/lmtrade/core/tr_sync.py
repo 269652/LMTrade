@@ -55,6 +55,22 @@ def sync_tr_portfolio(store: Store, tr) -> dict:
             log.info("Reconciled away phantom live position %s (%s) — not in "
                      "the real TR portfolio.", o["underlying"], isin or "no ISIN")
 
+    # Pending live orders: a process crash between placing a real order and
+    # confirming it (mark_option_open) leaves a 'pending' row. TR's own
+    # portfolio is authoritative — if the fill really happened, promote it;
+    # if TR never has it, it's a phantom, same treatment as a stale open row.
+    for o in store.pending_options():
+        isin = o.get("isin")
+        if isin in tr_by_isin:
+            store.mark_option_open(o["id"])
+            log.info("Reconciled pending order %s (%s) as confirmed — TR "
+                     "portfolio holds it.", o["underlying"], isin)
+        else:
+            store.delete_option(o["id"])
+            summary["removed_options"] += 1
+            log.info("Reconciled away phantom pending order %s (%s) — not in "
+                     "the real TR portfolio.", o["underlying"], isin or "no ISIN")
+
     tracked = {o.get("isin") for o in store.open_options()}
 
     # Equity rows: drop what TR doesn't hold, import what it does.

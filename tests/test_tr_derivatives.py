@@ -8,6 +8,7 @@ before implementation per strict TDD."""
 from __future__ import annotations
 
 import math
+import time
 from pathlib import Path
 
 import pytest
@@ -83,11 +84,16 @@ class FakeAsyncTRApi:
     without ever touching TR's real (websocket) API."""
 
     def __init__(self, resume_ok=True, search_results=None, derivative_results=None,
-                 cash_payload=None):
+                 derivative_results_by_category=None, cash_payload=None):
         self.resume_ok = resume_ok
         self._search_results = (
             search_results if search_results is not None else [{"isin": "US0378331005"}])
         self._derivative_results = derivative_results if derivative_results is not None else []
+        # Optional per-category override, so a single fake can simulate
+        # different result sets for e.g. knockOutProduct vs vanillaWarrant.
+        # Falls back to _derivative_results (same for every category) when
+        # not given — every pre-existing test keeps working unmodified.
+        self._derivative_results_by_category = derivative_results_by_category or {}
         self._cash_payload = (cash_payload if cash_payload is not None
                               else [{"currencyId": "EUR", "amount": 42.5}])
         self.calls: list[tuple] = []
@@ -108,12 +114,22 @@ class FakeAsyncTRApi:
         return "sub-cash"
 
     async def recv(self):
-        kind = self.calls[-1][0]
+        last = self.calls[-1]
+        kind = last[0]
         if kind == "search":
             return ("sub-search", {}, {"results": self._search_results})
         if kind == "cash":
             return ("sub-cash", {}, self._cash_payload)
-        return ("sub-deriv", {}, {"results": self._derivative_results})
+        category = last[2]
+        if self._derivative_results_by_category:
+            results = self._derivative_results_by_category.get(category, [])
+        else:
+            # No per-category map given: legacy single-list callers only
+            # meant the (first-queried) knockout category — every test
+            # written before the vanilla-warrant fallback existed assumed
+            # exactly one category was ever searched.
+            results = self._derivative_results if category == "knockOutProduct" else []
+        return ("sub-deriv", {}, {"results": results})
 
     async def unsubscribe(self, sub_id):
         self.calls.append(("unsubscribe", sub_id))
@@ -338,6 +354,80 @@ class TestSessionRecovery:
         # Session invalidated + in backoff now.
         assert client._api is None
         assert client._next_retry > clock[0]
+
+
+class TestVanillaWarrantFallback:
+    """Live incident: most symbols return NO knockOutProduct instruments at
+    all — TR simply doesn't list a Turbo/KO for them, but often does list a
+    vanilla warrant (put/call, no barrier). search() now tries BOTH
+    categories and merges the results; find_knockout()'s leverage-closest-fit
+    selection then picks whichever instrument (KO or vanilla) actually
+    exists and best matches, instead of returning nothing."""
+
+    def test_falls_back_to_vanilla_warrant_when_no_knockout_found(self):
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [],
+                "vanillaWarrant": [{"isin": "DE000WARRANT1", "strike": 180.0,
+                                    "ask": 3.0, "leverage": 6.0,
+                                    "issuerDisplayName": "TestBank"}],
+            })
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        quotes = client.search("AAPL", "buy")
+        assert len(quotes) == 1
+        assert quotes[0].isin == "DE000WARRANT1"
+        assert quotes[0].barrier is None          # no knockout barrier
+        assert quotes[0].kind == "call"            # NOT ko_call — routes to BS marking
+
+    def test_both_categories_merged_into_one_candidate_pool(self):
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [{"isin": "DE000KO1", "strike": 170.0, "barrier": 170.0,
+                                     "ratio": 10.0, "ask": 2.0, "leverage": 5.0}],
+                "vanillaWarrant": [{"isin": "DE000WARRANT1", "strike": 180.0,
+                                    "ask": 3.0, "leverage": 6.0}],
+            })
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        quotes = client.search("AAPL", "buy")
+        assert {q.isin for q in quotes} == {"DE000KO1", "DE000WARRANT1"}
+
+    def test_find_knockout_selects_best_vanilla_candidate(self):
+        # Only vanilla instruments exist; the closest-leverage-fit selection
+        # must still work for them (direction-matching by kind: call/put,
+        # not just ko_call/ko_put).
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [],
+                "vanillaWarrant": [
+                    {"isin": "DE000W1", "strike": 170.0, "ask": 2.0, "leverage": 3.0},
+                    {"isin": "DE000W2", "strike": 180.0, "ask": 3.0, "leverage": 6.0},
+                ],
+            })
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        best = client.find_knockout("AAPL", direction="buy", spot=175.0, target_leverage=6.5)
+        assert best.isin == "DE000W2"        # 6.0x closer to 6.5x target than 3.0x
+
+    def test_vanilla_sell_direction_maps_to_put(self):
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={
+                "knockOutProduct": [],
+                "vanillaWarrant": [{"isin": "DE000W1", "strike": 170.0, "ask": 2.0,
+                                    "leverage": 4.0}],
+            })
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        quotes = client.search("AAPL", "sell")
+        assert quotes[0].kind == "put"
+
+    def test_no_instruments_in_either_category_returns_empty(self):
+        api = FakeAsyncTRApi(
+            search_results=[{"isin": "US0378331005"}],
+            derivative_results_by_category={"knockOutProduct": [], "vanillaWarrant": []})
+        client = PytrDerivatives("+491234", "1234", api_factory=lambda: api)
+        assert client.search("AAPL", "buy") == []
 
 
 class TestPytrSearchDiagnostics:
@@ -574,6 +664,29 @@ class TestEngineIntegration:
         assert o["barrier"] == pytest.approx(80.0)
         assert o["tp_premium"] and o["sl_premium"]   # stops still placed
 
+    def test_with_tr_client_opens_vanilla_warrant_when_no_knockout(self, settings, store):
+        # Most real symbols have no knockout/Turbo — a real vanilla put/call
+        # warrant (barrier=None) must still be tradeable, marked via the
+        # standard option model (real ISIN/strike/expiry from TR; a locally
+        # estimated IV, same as the knockout's local barrier-pricing model —
+        # not a fabricated instrument, just how ongoing marks are computed).
+        client = FakeTRDerivatives(catalog={
+            "AAPL": [TRDerivativeQuote(isin="DE000WARRANT1", underlying="AAPL",
+                                       kind="call", strike=80.0, barrier=None,
+                                       ratio=1.0, price=2.05, leverage=5.0,
+                                       issuer="FakeBank",
+                                       expiry_ts=time.time() + 45 * 86400.0)]})
+        engine = self._engine(settings, store, client)
+        engine.run_cycle()
+        opts = store.open_options()
+        assert opts, "expected a vanilla warrant position"
+        o = opts[0]
+        assert o["instrument_type"] == "option"
+        assert o["isin"] == "DE000WARRANT1"
+        assert o["barrier"] is None
+        assert o["iv"] > 0            # estimated from realized vol, not zero
+        assert o["tp_premium"] and o["sl_premium"]
+
     def test_without_tr_client_opens_nothing(self, settings, store):
         # Policy: ONLY real TR derivatives are ever traded, in paper AND live —
         # no synthetic Black-Scholes fallback. Without a TR client, the engine
@@ -627,9 +740,80 @@ class TestEngineIntegration:
         assert placed, "a real order should have been placed"
         assert placed[0]["isin"] == "DE000LIVE"
         assert placed[0]["side"] == "buy"
-        # Position recorded in the (live) book with the real ISIN.
+        # Position recorded in the (live) book with the real ISIN, PROCESSED
+        # (status='open') once TR confirmed — no dangling pending row.
         opts = store.open_options()
         assert opts and opts[0]["isin"] == "DE000LIVE"
+        assert opts[0]["status"] == "open"
+        assert store.pending_options() == []
+
+    def test_pending_row_exists_before_order_is_placed(self, settings, store):
+        # The order-of-operations guarantee: a pending row must already be in
+        # the store by the time place_order() is called, so a crash mid-flight
+        # (or a slow confirmation wait) leaves a reconcilable trace instead of
+        # nothing at all.
+        from lmtrade.brokers.base import OrderResult
+
+        seen_pending_at_call_time = []
+
+        class ArmedBroker:
+            mode = "live"
+            armed = True
+
+            def cash(self):
+                return 1000.0
+
+            def place_order(self, isin, side, size, exchange="LSX"):
+                seen_pending_at_call_time.append(list(store.pending_options()))
+                return OrderResult(True, isin, side, size, 0.0, 1.0, "placed")
+
+        client = FakeTRDerivatives(catalog={
+            "AAPL": [TRDerivativeQuote(isin="DE000LIVE", underlying="AAPL",
+                                       kind="ko_call", strike=80.0, barrier=80.0,
+                                       ratio=10.0, price=2.0, leverage=5.0,
+                                       issuer="Bank")]})
+        market = ScriptedMarket({"AAPL": Quote("AAPL", 100.0, buy_signal_history(80.0), "yahoo")})
+        engine = Engine(settings, store, ArmedBroker(), market=market, tr_derivatives=client)
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert len(seen_pending_at_call_time) == 1, "place_order should be called exactly once"
+        pending_at_call_time = seen_pending_at_call_time[0]
+        assert pending_at_call_time, "a pending row must exist BEFORE the order is placed"
+        assert pending_at_call_time[0]["isin"] == "DE000LIVE"
+        assert pending_at_call_time[0]["status"] == "pending"
+
+    def test_entry_dedup_skips_symbol_with_existing_pending_row(self, settings, store):
+        # A symbol with an order still awaiting TR confirmation must never
+        # get a SECOND order placed on the same/next candidate pass.
+        from lmtrade.brokers.base import OrderResult
+
+        store.open_option("AAPL", "ko_call", strike=80.0, expiry_ts=4e12, iv=0.0,
+                          contracts=1.0, entry_premium=2.0, genome_id=None,
+                          tp_premium=3.0, sl_premium=1.0, instrument_type="knockout",
+                          barrier=80.0, ratio=10.0, isin="DE000PENDING", status="pending")
+        placed = []
+
+        class ArmedBroker:
+            mode = "live"
+            armed = True
+
+            def cash(self):
+                return 1000.0
+
+            def place_order(self, isin, side, size, exchange="LSX"):
+                placed.append(isin)
+                return OrderResult(True, isin, side, size, 0.0, 1.0, "placed")
+
+        client = FakeTRDerivatives(catalog={
+            "AAPL": [TRDerivativeQuote(isin="DE000NEW", underlying="AAPL",
+                                       kind="ko_call", strike=80.0, barrier=80.0,
+                                       ratio=10.0, price=2.0, leverage=5.0,
+                                       issuer="Bank")]})
+        market = ScriptedMarket({"AAPL": Quote("AAPL", 100.0, buy_signal_history(80.0), "yahoo")})
+        engine = Engine(settings, store, ArmedBroker(), market=market, tr_derivatives=client)
+        engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
+        engine.run_cycle()
+        assert placed == [], "must not place a second order while one is pending for the symbol"
 
     def test_low_balance_blocks_real_order_without_second_guard(self, settings, store):
         from lmtrade.brokers.base import OrderResult
@@ -740,6 +924,7 @@ class TestEngineIntegration:
         engine._decide = lambda q: (Decision(q.symbol, "buy", 0.9, "scripted"), None)
         engine.run_cycle()
         assert store.open_options() == []   # no fallback to synthetic when live-armed
+        assert store.pending_options() == [], "a rejected order must not leave a dangling pending row"
 
     def test_knockout_position_knocked_out_when_barrier_touched(self, settings, store):
         client = FakeTRDerivatives(catalog={

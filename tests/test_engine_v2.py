@@ -158,6 +158,28 @@ class TestScheduledResearch:
         engine.run_cycle()
         assert calls == ["AAPL", "AAPL"]
 
+    def test_news_fetch_concurrency_capped_at_5(self, settings, store):
+        import threading
+
+        settings.universe = [f"SYM{i}" for i in range(12)]
+        concurrent = [0]
+        max_seen = [0]
+        lock = threading.Lock()
+
+        def slow_fetch(symbol):
+            with lock:
+                concurrent[0] += 1
+                max_seen[0] = max(max_seen[0], concurrent[0])
+            import time as _t
+            _t.sleep(0.05)
+            with lock:
+                concurrent[0] -= 1
+            return f"{symbol} steady. SENTIMENT: neutral", 0.0
+
+        engine = make_engine(settings, store, news_fetcher=slow_fetch)
+        engine.run_cycle()
+        assert max_seen[0] <= 5, "news fetch must be capped at 5 concurrent requests"
+
     def test_daily_analysis_runs_and_applies(self, settings, store):
         response = json.dumps({"risk": {"min_confidence": 0.7}, "notes": "ok"})
         engine = make_engine(settings, store,
@@ -518,6 +540,20 @@ class TestBookFullVisibility:
         engine.run_cycle()
         logs = " ".join(l["message"] for l in store.recent_logs(50)).lower()
         assert "no free slot" not in logs
+
+    def test_pending_orders_count_toward_max_positions(self, settings, store):
+        # A live order still awaiting TR confirmation occupies a slot just
+        # like a confirmed one — otherwise the book could accept more
+        # concurrent orders than max_positions while several are in flight.
+        settings.loop.max_positions = 1
+        store.open_option("AAPL", "ko_call", strike=80.0, expiry_ts=4e12, iv=0.0,
+                          contracts=1.0, entry_premium=2.0, genome_id=None,
+                          tp_premium=3.0, sl_premium=1.0, instrument_type="knockout",
+                          barrier=80.0, ratio=10.0, isin="DE000PENDING", status="pending")
+        engine = make_engine(settings, store)
+        engine.run_cycle()
+        logs = " ".join(l["message"] for l in store.recent_logs(50)).lower()
+        assert "no free slot" in logs or "full" in logs
 
 
 class TestProfitStash:

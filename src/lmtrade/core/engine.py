@@ -29,7 +29,7 @@ from ..finance.knockouts import (
     knockout_price,
     strike_after_financing,
 )
-from ..finance.options import mark_option
+from ..finance.options import mark_option, realized_iv
 from ..finance.risk import should_exit, size_position
 from ..finance.sizing import kelly_fraction, regime, vol_scale
 from ..models.base import Signal
@@ -49,6 +49,7 @@ ANALYSIS_RETRY_S = 15 * 60   # when analysis is missing/unusable, retry this oft
                              # (not every cycle) so a provider outage doesn't hammer
 NEWS_STALE_GATE_S = 2 * 3600   # no fresh Claude research within this window ->
                                 # pause new entries (existing positions still managed)
+NEWS_FETCH_BATCH_SIZE = 5      # concurrent news fetches per cycle
 
 
 class _SharedResearchStore:
@@ -287,7 +288,7 @@ class Engine:
                     self.bus.info(f"[research] news {done}/{total} {symbol}: no data",
                                   source="research")
 
-            self.news.get_many(universe, max_workers=min(8, len(universe)),
+            self.news.get_many(universe, max_workers=min(NEWS_FETCH_BATCH_SIZE, len(universe)),
                                on_progress=_news_progress)
             self.bus.info("[research] news fetch complete", source="research")
         daily_iv = self.settings.research.daily_analysis_interval_hours * 3600
@@ -611,6 +612,25 @@ class Engine:
         # below is re-checked against the live balance on every order.
         armed_real = broker_armed and has_place_order
 
+        tp_premium = ko.price * (1 + cfg.take_profit_pct)
+        sl_premium = ko.price * (1 - cfg.stop_loss_pct)
+        # ko.barrier is None for a vanilla put/call warrant (no knockout
+        # event) — a real TR instrument, just a different product type, and
+        # the ONLY one available for most symbols in practice. It marks via
+        # the standard option (Black-Scholes) model instead of the
+        # barrier-product one, using its own real expiry and an IV estimated
+        # from realized volatility (TR doesn't hand back one directly).
+        is_knockout = ko.barrier is not None
+        if is_knockout:
+            instrument_type = "knockout"
+            iv = 0.0
+            # KOs are open-ended: expiry far out; the barrier is the real risk.
+            expiry_ts = self.now() + 365 * 86400.0
+        else:
+            instrument_type = "option"
+            iv = realized_iv(quote.history)
+            expiry_ts = ko.expiry_ts if ko.expiry_ts else self.now() + 60 * 86400.0
+
         if armed_real:
             # Runtime low-balance guard (second arming switch): below
             # LOW_BALANCE_EUR the flat ~1 EUR fee is a >1% drag, so real orders
@@ -631,30 +651,37 @@ class Engine:
                     f"LIVE knockout {ko.isin}: budget too small for one "
                     f"certificate at {ko.price:.2f} — skipping.", source="engine")
                 return True
-            res = self.broker.place_order(ko.isin, "buy", float(size))
+            contracts = float(size)
+            # A pending row is created BEFORE the order is placed — TR's
+            # confirmation wait (place_order's warning-ack-resubmit dance)
+            # can take a moment, and a process crash mid-flight must leave a
+            # visible, reconcilable trace (sync_tr_portfolio resolves it
+            # against the real account) rather than nothing at all.
+            opt_id = self.store.open_option(
+                quote.symbol, ko.kind, ko.strike, expiry_ts, iv, contracts,
+                ko.price, genome_id, tp_premium=tp_premium, sl_premium=sl_premium,
+                instrument_type=instrument_type, barrier=ko.barrier, ratio=ko.ratio,
+                isin=ko.isin, status="pending")
+            res = self.broker.place_order(ko.isin, "buy", contracts)
             if not res.ok:
+                self.store.delete_option(opt_id)
                 self.bus.warn(f"LIVE knockout order rejected [{ko.isin}]: "
                               f"{res.message}", source="engine")
                 return True   # never fall back to synthetic once live-armed
-            # Real fill: cash is the REAL TR account (no local ledger to debit).
-            # The live view's balances come from TR; we only record the fee for
-            # cost accounting and then book the position locally.
-            contracts = float(size)
+            # Real fill confirmed by TR: cash is the REAL TR account (no local
+            # ledger to debit). We only record the fee for cost accounting.
+            self.store.mark_option_open(opt_id)
             self.store.record_cost("fee", OPTION_FEE, "options")
         else:
             cost = contracts * ko.price + OPTION_FEE
             if not self.broker.adjust_cash(-cost):
                 return True
             self.store.record_cost("fee", OPTION_FEE, "options")
-        tp_premium = ko.price * (1 + cfg.take_profit_pct)
-        sl_premium = ko.price * (1 - cfg.stop_loss_pct)
-        # KOs are open-ended: expiry far out; the barrier is the real risk.
-        expiry_ts = self.now() + 365 * 86400.0
-        self.store.open_option(
-            quote.symbol, ko.kind, ko.strike, expiry_ts, 0.0, contracts,
-            ko.price, genome_id, tp_premium=tp_premium, sl_premium=sl_premium,
-            instrument_type="knockout", barrier=ko.barrier, ratio=ko.ratio,
-            isin=ko.isin)
+            self.store.open_option(
+                quote.symbol, ko.kind, ko.strike, expiry_ts, iv, contracts,
+                ko.price, genome_id, tp_premium=tp_premium, sl_premium=sl_premium,
+                instrument_type=instrument_type, barrier=ko.barrier, ratio=ko.ratio,
+                isin=ko.isin)   # paper fill: immediately 'open', no pending step
         self.store.record_trade(Trade(
             quote.symbol, "buy", contracts, ko.price, OPTION_FEE,
             self.broker.mode,
@@ -804,7 +831,8 @@ class Engine:
                 f"managed; NO NEW positions will open until news updates.",
                 source="research")
         else:
-            open_count = len(self.store.open_options()) + len(self.store.positions())
+            open_count = (len(self.store.open_options()) + len(self.store.positions())
+                         + len(self.store.pending_options()))
             slots = self.settings.loop.max_positions - open_count
             if slots <= 0:
                 # Book full — the decision/entry step is skipped this cycle.
@@ -820,8 +848,12 @@ class Engine:
                     break
                 if symbol not in tradeable:
                     continue
+                # Pending live orders count too — a symbol with an order still
+                # awaiting TR confirmation must never get a second one placed
+                # on the next candidate/cycle.
                 if self.store.position(symbol) or any(
-                        o["underlying"] == symbol for o in self.store.open_options()):
+                        o["underlying"] == symbol
+                        for o in self.store.open_options() + self.store.pending_options()):
                     continue
                 if not self.accountant.can_afford_inference(econ, est_usd=0.01):
                     break
