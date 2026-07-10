@@ -49,6 +49,49 @@ ANALYSIS_RETRY_S = 15 * 60   # when analysis is missing/unusable, retry this oft
                              # (not every cycle) so a provider outage doesn't hammer
 
 
+class _SharedResearchStore:
+    """Wraps the active book's store so NEWS and the compiled MARKET ANALYSIS
+    are read/written through BOTH the paper and live books — they are
+    process-wide research, not book-specific trading state, and fetching them
+    twice (once per book, whenever each becomes 'active') wastes real web-
+    search/LLM calls. Everything else (trades, costs, activity) passes
+    through to the active book only: a single real API call must be billed
+    once, not mirrored as if it happened twice."""
+
+    _SHARED_META_KEYS = ("market_analysis", "provider_warnings")
+
+    def __init__(self, primary: Store, secondary: Store | None):
+        self._primary = primary
+        self._secondary = secondary
+
+    def __getattr__(self, name):
+        return getattr(self._primary, name)
+
+    def latest_news(self, symbol: str):
+        row = self._primary.latest_news(symbol)
+        if row is not None:
+            return row
+        return self._secondary.latest_news(symbol) if self._secondary else None
+
+    def add_news(self, symbol: str, text: str, sentiment: str, ts=None) -> None:
+        self._primary.add_news(symbol, text, sentiment, ts=ts)
+        if self._secondary is not None:
+            self._secondary.add_news(symbol, text, sentiment, ts=ts)
+
+    def get_meta(self, key: str, default=None):
+        if key not in self._SHARED_META_KEYS:
+            return self._primary.get_meta(key, default)
+        v = self._primary.get_meta(key, None)
+        if v is None and self._secondary is not None:
+            v = self._secondary.get_meta(key, None)
+        return v if v is not None else default
+
+    def set_meta(self, key: str, value) -> None:
+        self._primary.set_meta(key, value)
+        if key in self._SHARED_META_KEYS and self._secondary is not None:
+            self._secondary.set_meta(key, value)
+
+
 class Engine:
     def __init__(
         self, settings: Settings, store: Store, broker: Broker,
@@ -77,8 +120,9 @@ class Engine:
         self.fusion = FusionEngine(settings, build_providers(settings))
         self.accountant = CostAccountant(settings, store)
         self.scheduler = Scheduler(store, now=now)
-        self.news = NewsService(store, settings, fetcher=news_fetcher, now=now)
-        self.analyst = DailyAnalyst(store, settings, caller=analysis_caller)
+        research_store = _SharedResearchStore(store, fallback_store)
+        self.news = NewsService(research_store, settings, fetcher=news_fetcher, now=now)
+        self.analyst = DailyAnalyst(research_store, settings, caller=analysis_caller)
         self.optimizer = (
             StrategyOptimizer(store, population=settings.learning.population,
                               epsilon=settings.learning.epsilon,

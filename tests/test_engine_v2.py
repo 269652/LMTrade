@@ -246,6 +246,85 @@ class TestOptionMarkPersistence:
         assert "mark_premium" in row
 
 
+class TestSharedResearchAcrossBooks:
+    """News and the compiled market analysis are process-wide research, not
+    book-specific state — fetching them once must be visible to BOTH the
+    paper and live engines without a second (wasted) fetch, whichever book
+    happens to be 'active' (self.store) when each engine cycle runs."""
+
+    def test_news_fetched_while_paper_active_seen_by_live_engine_without_refetch(
+        self, settings, store
+    ):
+        from lmtrade.core.state import Store
+
+        live = Store(store.db_path.parent / "live.db")
+        calls: list[str] = []
+
+        def fetcher(symbol):
+            calls.append(symbol)
+            return f"{symbol} steady. SENTIMENT: neutral", 0.0
+
+        # Paper engine (self.store=paper, fallback_store=live) fetches news.
+        paper_engine = make_engine(settings, store, news_fetcher=fetcher,
+                                   fallback_store=live)
+        paper_engine.run_cycle()
+        assert calls == ["AAPL"]
+
+        # Live engine (self.store=live, fallback_store=paper) must see the
+        # SAME news without refetching, even though ITS OWN book (live) never
+        # directly received the fetch.
+        live_engine = make_engine(settings, live, news_fetcher=fetcher,
+                                  fallback_store=store)
+        live_engine.run_cycle()
+        assert calls == ["AAPL"], "must not refetch news already fetched by the other book"
+        live.close()
+
+    def test_analysis_compiled_while_paper_active_seen_by_live_engine_without_recompile(
+        self, settings, store
+    ):
+        from lmtrade.core.state import Store
+
+        live = Store(store.db_path.parent / "live.db")
+        prompts: list[str] = []
+
+        def caller(p):
+            prompts.append(p)
+            return json.dumps({"symbols": {"AAPL": {"bias": "bullish",
+                                                    "confidence": 0.8}}}), 0.0
+
+        def analysis_prompts() -> int:
+            return sum(1 for p in prompts if "directional bias" in p)
+
+        paper_engine = make_engine(settings, store, analysis_caller=caller,
+                                   fallback_store=live)
+        paper_engine.run_cycle()
+        assert analysis_prompts() == 1
+
+        live_engine = make_engine(settings, live, analysis_caller=caller,
+                                  fallback_store=store)
+        live_engine.run_cycle()
+        assert analysis_prompts() == 1, "must not recompile analysis already fresh in the other book"
+        assert live.get_meta("market_analysis")["symbols"]["AAPL"]["bias"] == "bullish"
+        live.close()
+
+    def test_inference_cost_charged_once_not_mirrored_to_both_books(self, settings, store):
+        # Sharing DATA must not double-bill: one real API call costs money
+        # once, charged to whichever book's engine actually made the call.
+        from lmtrade.core.state import Store
+
+        live = Store(store.db_path.parent / "live.db")
+
+        def caller(p):
+            return json.dumps({"symbols": {"AAPL": {"bias": "bullish", "confidence": 0.8}}}), 0.05
+
+        paper_engine = make_engine(settings, store, analysis_caller=caller,
+                                   fallback_store=live)
+        paper_engine.run_cycle()
+        assert store.total_costs().get("inference", 0.0) > 0.0    # billed to the active book
+        assert live.total_costs().get("inference", 0.0) == pytest.approx(0.0)  # never mirrored
+        live.close()
+
+
 class TestCrossBookValuation:
     """The live dashboard view must ALWAYS show real TR cash and an accurate
     net worth (real cash + real position value) — even while UNARMED, when
