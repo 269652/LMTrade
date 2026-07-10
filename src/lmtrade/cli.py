@@ -173,13 +173,21 @@ def _build_engine_for_control(settings, control):
     tr = build_tr_derivatives(settings)
     engine = Engine(settings, store, broker, tr_derivatives=tr, fallback_store=fallback_store)
     if control.mode == "live" and tr is not None:
-        # Reconcile the LIVE book against the real TR account at startup —
-        # refresh real cash, import untracked TR positions (e.g. after a db
-        # reset), delete phantom rows TR doesn't hold. The live view is then
-        # exactly real cash + real positions.
+        # Reconcile the LIVE book against the real TR account whenever the
+        # dashboard switches TO live mode (this function reruns on every
+        # mode/armed change — see _run_with_control's rebuild_when) and on
+        # every fresh startup while already in live mode (e.g. after
+        # `lmtrade reset` + restart): refresh real cash, import untracked TR
+        # positions, delete phantom rows TR doesn't hold. The live view is
+        # then exactly real cash + real positions.
         from .core.tr_sync import sync_tr_portfolio
 
-        live_store = store if book == "live" else Store(settings.live_db_path)
+        # fallback_store already IS the live book whenever we're not trading
+        # it directly (book != "live") — reuse it instead of opening a third
+        # connection to the same file. Neither store is closed here: `store`
+        # is owned by the caller, `fallback_store` lives for the engine's
+        # whole run (cross-book valuation reads it every cycle).
+        live_store = store if book == "live" else fallback_store
         try:
             s = sync_tr_portfolio(live_store, tr)
             cash_txt = "—" if s["cash"] is None else f"{s['cash']:.2f} EUR"
@@ -189,9 +197,6 @@ def _build_engine_for_control(settings, control):
                 f"imported {s['imported']} | removed {removed} phantom row(s)")
         except Exception as exc:  # noqa: BLE001 — sync must never block startup
             console.print(f"[yellow]TR sync skipped ({exc})[/yellow]")
-        finally:
-            if live_store is not store:
-                live_store.close()
     return engine, store
 
 
